@@ -4,7 +4,8 @@
  * Embeds a Rocky Vulkan earth view inside a Qt Advanced Docking System pane,
  * with Qt widgets overlaid on the Rocky view.
  *
- * Right-click on the earth to place a marker and display lat/lon.
+ * Right-click on the earth to add waypoints to a flight plan.
+ * Configure altitude (MSL/AGL) and speed (knots) before clicking.
  */
 
 #include <rocky/rocky.h>
@@ -14,16 +15,20 @@
 #include <QMainWindow>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QFormLayout>
 #include <QLabel>
 #include <QPushButton>
-#include <QSlider>
+#include <QDoubleSpinBox>
+#include <QSpinBox>
 #include <QTextEdit>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QComboBox>
+#include <QGroupBox>
 #include <QStatusBar>
 #include <QMenuBar>
 #include <QTimer>
+#include <QHeaderView>
 
 #include <DockManager.h>
 #include <DockWidget.h>
@@ -33,137 +38,133 @@
 
 #include <mutex>
 #include <deque>
-#include <sstream>
-#include <iomanip>
+#include <cmath>
 
 using namespace ROCKY_NAMESPACE;
 
-// Struct to pass marker data from VSG thread to Qt thread
-struct MarkerInfo
+// ── Data structures ─────────────────────────────────────────────────
+
+struct Waypoint
 {
-    double lon;
-    double lat;
-    double alt;
-    entt::entity entity;
+    int index;
+    double lon, lat;
+    double terrainAlt;     // ground elevation at click point (meters)
+    double flightAlt;      // pilot-entered altitude value
+    bool isMSL;            // true=MSL, false=AGL
+    double speedKnots;
+    entt::entity pointEntity = entt::null;
 };
 
-// Thread-safe queue for markers created on the VSG/render thread
-class MarkerQueue
+// Thread-safe queue to pass click data from VSG to Qt
+class WaypointQueue
 {
 public:
-    void push(const MarkerInfo& m)
+    void push(const Waypoint& w)
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push_back(m);
+        queue_.push_back(w);
     }
-
-    bool pop(MarkerInfo& m)
+    bool pop(Waypoint& w)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (queue_.empty()) return false;
-        m = queue_.front();
+        w = queue_.front();
         queue_.pop_front();
         return true;
     }
-
 private:
     std::mutex mutex_;
-    std::deque<MarkerInfo> queue_;
+    std::deque<Waypoint> queue_;
 };
 
-// Global marker queue for the VSG event handler
-static MarkerQueue g_markerQueue;
+static WaypointQueue g_wpQueue;
 
-// VSG event handler that intercepts right-clicks and places markers
+// Shared settings the event handler reads (written by Qt thread)
+struct FlightSettings
+{
+    std::atomic<double> altitude{5000.0};
+    std::atomic<bool> isMSL{true};
+    std::atomic<double> speedKnots{250.0};
+    std::atomic<int> nextIndex{1};
+};
+
+static FlightSettings g_settings;
+
+// ── VSG right-click handler ─────────────────────────────────────────
+
 class RightClickHandler : public vsg::Inherit<vsg::Visitor, RightClickHandler>
 {
 public:
     rocky::Application* app = nullptr;
-    int markerCount = 0;
 
     void apply(vsg::ButtonReleaseEvent& event) override
     {
-        // Button 3 = right mouse button in VSG
         if (event.button != 3 || !app)
             return;
 
-        int x = event.x;
-        int y = event.y;
-
-        // Find the view under the mouse and pick the earth surface
         auto result = rocky::pointAtWindowCoords(
             vsg::ref_ptr<vsg::Viewer>(app->viewer.get()),
-            x, y);
+            event.x, event.y);
 
-        if (result.ok())
+        if (!result.ok())
+            return;
+
+        auto wgs84 = result.value().point.transform(SRS::WGS84);
+        double lon = wgs84.x, lat = wgs84.y, terrainAlt = wgs84.z;
+        double flightAlt = g_settings.altitude.load();
+        bool isMSL = g_settings.isMSL.load();
+        double speed = g_settings.speedKnots.load();
+        int idx = g_settings.nextIndex.fetch_add(1);
+
+        // Compute display altitude in meters MSL for the point marker
+        double markerAltMSL = isMSL ? flightAlt * 0.3048 : terrainAlt + flightAlt * 0.3048;
+
+        // Create a point marker on the globe
+        entt::entity entity = entt::null;
+        app->registry.write([&](entt::registry& r)
         {
-            auto geoPoint = result.value().point;
+            entity = r.create();
 
-            // Transform to WGS84 lat/lon if needed
-            auto wgs84Point = geoPoint.transform(SRS::WGS84);
-            double lon = wgs84Point.x;
-            double lat = wgs84Point.y;
-            double alt = wgs84Point.z;
+            auto& geom = r.emplace<PointGeometry>(entity);
+            geom.srs = SRS::WGS84;
+            geom.points.emplace_back(lon, lat, markerAltMSL);
 
-            // Create a point marker entity in the Rocky ECS
-            entt::entity entity = entt::null;
-            app->registry.write([&](entt::registry& r)
-            {
-                entity = r.create();
+            auto& style = r.emplace<PointStyle>(entity);
+            style.color = Color(0.2f, 0.6f, 1.0f, 1.0f); // blue
+            style.width = 10.0f;
+            style.antialias = 0.5f;
+            style.depthOffset = 10000.0f;
 
-                // Single-point geometry at the clicked location
-                auto& geometry = r.emplace<PointGeometry>(entity);
-                geometry.srs = SRS::WGS84;
-                geometry.points.emplace_back(lon, lat, alt + 100.0); // slight offset above terrain
+            r.emplace<Point>(entity, geom, style);
+            app->vsgcontext->requestFrame();
+        });
 
-                // Style: bright marker
-                auto& style = r.emplace<PointStyle>(entity);
-                style.color = Color(1.0f, 0.2f, 0.2f, 1.0f); // red
-                style.width = 12.0f;
-                style.antialias = 0.5f;
-                style.depthOffset = 10000.0f;
-
-                r.emplace<Point>(entity, geometry, style);
-
-                app->vsgcontext->requestFrame();
-            });
-
-            markerCount++;
-
-            // Queue the marker info for the Qt thread to pick up
-            g_markerQueue.push({ lon, lat, alt, entity });
-        }
+        g_wpQueue.push({ idx, lon, lat, terrainAlt, flightAlt, isMSL, speed, entity });
     }
 };
 
-// Custom viewer that bridges Rocky's frame loop with Qt's event loop
+// ── Rocky Qt viewer ─────────────────────────────────────────────────
+
 class RockyQtViewer : public vsg::Inherit<vsgQt::Viewer, RockyQtViewer>
 {
 public:
-    void render(double simTime) override
+    std::function<bool()> frame;
+    void render(double) override
     {
         if (continuousUpdate || requests.load() > 0)
-        {
-            if (frame() == false)
-            {
+            if (!frame())
                 if (status->cancel())
-                {
                     QApplication::quit();
-                }
-            }
-        }
     }
-
-    std::function<bool()> frame;
 };
 
-// Transparent overlay widget on top of the Rocky view
+// ── Overlay widget on the Rocky view ────────────────────────────────
+
 class RockyOverlayWidget : public QWidget
 {
     Q_OBJECT
 public:
-    explicit RockyOverlayWidget(QWidget* parent = nullptr)
-        : QWidget(parent)
+    explicit RockyOverlayWidget(QWidget* parent = nullptr) : QWidget(parent)
     {
         setAttribute(Qt::WA_TransparentForMouseEvents, true);
         setAttribute(Qt::WA_TranslucentBackground, true);
@@ -183,62 +184,48 @@ public:
             "  border-radius: 4px;"
             "}";
 
-        // Instruction label
-        instructionLabel_ = new QLabel("Right-click on the earth to place a marker");
+        instructionLabel_ = new QLabel("Right-click on the earth to add waypoints");
         instructionLabel_->setStyleSheet(labelStyle);
         layout->addWidget(instructionLabel_);
 
-        // Last-clicked coordinate display
-        coordLabel_ = new QLabel("");
-        coordLabel_->setStyleSheet(
+        lastWpLabel_ = new QLabel("");
+        lastWpLabel_->setStyleSheet(
             "QLabel {"
             "  background-color: rgba(0, 0, 0, 180);"
             "  color: #ffcc00;"
             "  font-family: monospace;"
-            "  font-size: 14px;"
+            "  font-size: 13px;"
             "  font-weight: bold;"
             "  padding: 8px 12px;"
             "  border-radius: 4px;"
             "  border: 1px solid rgba(255, 204, 0, 100);"
             "}");
-        coordLabel_->setVisible(false);
-        layout->addWidget(coordLabel_);
-
-        // Marker count
-        countLabel_ = new QLabel("");
-        countLabel_->setStyleSheet(labelStyle);
-        countLabel_->setVisible(false);
-        layout->addWidget(countLabel_);
-
+        lastWpLabel_->setVisible(false);
+        layout->addWidget(lastWpLabel_);
         layout->addStretch();
     }
 
-    void showMarker(double lon, double lat, double alt, int count)
+    void showWaypoint(const Waypoint& wp)
     {
-        auto latDir = lat >= 0 ? "N" : "S";
-        auto lonDir = lon >= 0 ? "E" : "W";
-
-        coordLabel_->setText(QString("Last: %1%2 %3, %4%5 %6  Alt: %7m")
-            .arg(QString::number(std::abs(lat), 'f', 6))
-            .arg(latDir)
-            .arg(QString::fromUtf8("\xC2\xB0"))
-            .arg(QString::number(std::abs(lon), 'f', 6))
-            .arg(lonDir)
-            .arg(QString::fromUtf8("\xC2\xB0"))
-            .arg(QString::number(alt, 'f', 1)));
-        coordLabel_->setVisible(true);
-
-        countLabel_->setText(QString("Markers placed: %1").arg(count));
-        countLabel_->setVisible(true);
+        lastWpLabel_->setText(QString("WP%1: %2%3 %4%5  %6ft %7  %8 kts")
+            .arg(wp.index)
+            .arg(QString::number(std::abs(wp.lat), 'f', 4))
+            .arg(wp.lat >= 0 ? "N" : "S")
+            .arg(QString::number(std::abs(wp.lon), 'f', 4))
+            .arg(wp.lon >= 0 ? "E" : "W")
+            .arg(QString::number(wp.flightAlt, 'f', 0))
+            .arg(wp.isMSL ? "MSL" : "AGL")
+            .arg(QString::number(wp.speedKnots, 'f', 0)));
+        lastWpLabel_->setVisible(true);
     }
 
 private:
     QLabel* instructionLabel_;
-    QLabel* coordLabel_;
-    QLabel* countLabel_;
+    QLabel* lastWpLabel_;
 };
 
-// Container widget that hosts the Rocky view with an overlay
+// ── Rocky dock content ──────────────────────────────────────────────
+
 class RockyDockContent : public QWidget
 {
     Q_OBJECT
@@ -250,16 +237,13 @@ public:
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(0);
 
-        // Create the Rocky/Vulkan window
         rockyWindow_ = new vsgQt::Window();
         rockyWidget_ = QWidget::createWindowContainer(rockyWindow_);
         layout->addWidget(rockyWidget_);
 
-        // Must call initializeWindow() AFTER createWindowContainer()
         rockyWindow_->initializeWindow();
         app_.display.addWindow(rockyWindow_->windowAdapter);
 
-        // Create overlay widget on top of the Rocky view
         overlay_ = new RockyOverlayWidget(rockyWidget_);
         overlay_->raise();
     }
@@ -281,153 +265,330 @@ private:
     RockyOverlayWidget* overlay_ = nullptr;
 };
 
+// ── Helpers ─────────────────────────────────────────────────────────
+
+static double haversineNm(double lat1, double lon1, double lat2, double lon2)
+{
+    constexpr double R = 3440.065; // earth radius in nautical miles
+    double dLat = (lat2 - lat1) * M_PI / 180.0;
+    double dLon = (lon2 - lon1) * M_PI / 180.0;
+    double a = std::sin(dLat / 2) * std::sin(dLat / 2) +
+               std::cos(lat1 * M_PI / 180.0) * std::cos(lat2 * M_PI / 180.0) *
+               std::sin(dLon / 2) * std::sin(dLon / 2);
+    return R * 2.0 * std::atan2(std::sqrt(a), std::sqrt(1.0 - a));
+}
+
+static double bearingDeg(double lat1, double lon1, double lat2, double lon2)
+{
+    double dLon = (lon2 - lon1) * M_PI / 180.0;
+    double la1 = lat1 * M_PI / 180.0, la2 = lat2 * M_PI / 180.0;
+    double y = std::sin(dLon) * std::cos(la2);
+    double x = std::cos(la1) * std::sin(la2) - std::sin(la1) * std::cos(la2) * std::cos(dLon);
+    double brg = std::atan2(y, x) * 180.0 / M_PI;
+    return std::fmod(brg + 360.0, 360.0);
+}
+
+// Format the flight plan as a readable text block
+static QString formatFlightPlan(const std::vector<Waypoint>& wps)
+{
+    if (wps.empty()) return "(empty flight plan)";
+
+    QString text;
+    text += QString("FLIGHT PLAN  (%1 waypoint%2)\n")
+        .arg(wps.size()).arg(wps.size() > 1 ? "s" : "");
+    text += QString("").fill('=', 72) + "\n\n";
+
+    double totalDist = 0;
+    double totalTime = 0; // hours
+
+    for (size_t i = 0; i < wps.size(); i++)
+    {
+        auto& wp = wps[i];
+        auto latDir = wp.lat >= 0 ? "N" : "S";
+        auto lonDir = wp.lon >= 0 ? "E" : "W";
+
+        text += QString("  WP%1  %2%3 %4  %5%6 %7\n")
+            .arg(wp.index, 2, 10, QChar('0'))
+            .arg(QString::number(std::abs(wp.lat), 'f', 5)).arg(latDir)
+            .arg(QString::fromUtf8("\xC2\xB0"))
+            .arg(QString::number(std::abs(wp.lon), 'f', 5)).arg(lonDir)
+            .arg(QString::fromUtf8("\xC2\xB0"));
+
+        text += QString("        ALT %1 ft %2   SPD %3 kts\n")
+            .arg(QString::number(wp.flightAlt, 'f', 0))
+            .arg(wp.isMSL ? "MSL" : "AGL")
+            .arg(QString::number(wp.speedKnots, 'f', 0));
+
+        if (i > 0)
+        {
+            auto& prev = wps[i - 1];
+            double dist = haversineNm(prev.lat, prev.lon, wp.lat, wp.lon);
+            double brg = bearingDeg(prev.lat, prev.lon, wp.lat, wp.lon);
+            double legTime = (wp.speedKnots > 0) ? dist / wp.speedKnots : 0;
+            totalDist += dist;
+            totalTime += legTime;
+
+            int mins = static_cast<int>(legTime * 60.0 + 0.5);
+
+            text += QString("        LEG  %1 nm  BRG %2%3  ETE %4 min\n")
+                .arg(QString::number(dist, 'f', 1))
+                .arg(QString::number(brg, 'f', 0))
+                .arg(QString::fromUtf8("\xC2\xB0"))
+                .arg(mins);
+        }
+        text += "\n";
+    }
+
+    text += QString("").fill('-', 72) + "\n";
+    int totalMins = static_cast<int>(totalTime * 60.0 + 0.5);
+    text += QString("  TOTAL DISTANCE: %1 nm\n").arg(QString::number(totalDist, 'f', 1));
+    text += QString("  TOTAL ETE:      %1h %2m\n")
+        .arg(totalMins / 60).arg(totalMins % 60, 2, 10, QChar('0'));
+    text += QString("  WAYPOINTS:      %1\n").arg(wps.size());
+
+    return text;
+}
+
+// ── main ────────────────────────────────────────────────────────────
+
 int main(int argc, char** argv)
 {
     try {
-    QApplication qtApp(argc, argv);
-    qtApp.setApplicationName("Rocky Qt Docking Demo");
 
-    // Create the Rocky viewer and application
+    QApplication qtApp(argc, argv);
+    qtApp.setApplicationName("Rocky Flight Planner");
+
     auto viewer = RockyQtViewer::create();
     rocky::Application app(viewer, argc, argv);
     app.renderContinuously = true;
-
     viewer->frame = [&app]() { return app.frame(); };
     viewer->continuousUpdate = true;
     viewer->setInterval(8);
-
     app.vsgcontext->devicePixelRatio = []() { return 1.0; };
     rocky::Log()->set_level(rocky::log::level::info);
 
-    // Add map layers
     if (app.mapNode->map->layers().empty())
     {
-        auto elevationLayer = rocky::TMSElevationLayer::create();
-        elevationLayer->uri = "https://readymap.org/readymap/tiles/1.0.0/116/";
-        app.mapNode->map->add(elevationLayer);
+        auto elev = rocky::TMSElevationLayer::create();
+        elev->uri = "https://readymap.org/readymap/tiles/1.0.0/116/";
+        app.mapNode->map->add(elev);
 
-        auto imageLayer = rocky::TMSImageLayer::create();
-        imageLayer->uri = "https://readymap.org/readymap/tiles/1.0.0/7";
-        app.mapNode->map->add(imageLayer);
+        auto img = rocky::TMSImageLayer::create();
+        img->uri = "https://readymap.org/readymap/tiles/1.0.0/7";
+        app.mapNode->map->add(img);
     }
 
-    // Install the right-click event handler on the viewer
     auto rightClickHandler = RightClickHandler::create();
     rightClickHandler->app = &app;
     app.viewer->getEventHandlers().push_back(rightClickHandler);
 
-    // Set up the main window
+    // ── Qt UI ───────────────────────────────────────────────────────
+
     QMainWindow mainWindow;
-    mainWindow.setWindowTitle("Rocky + Qt Advanced Docking System");
-    mainWindow.resize(1280, 800);
+    mainWindow.setWindowTitle("Rocky Flight Planner");
+    mainWindow.resize(1400, 850);
 
     auto* menuBar = mainWindow.menuBar();
     auto* fileMenu = menuBar->addMenu("&File");
     fileMenu->addAction("E&xit", &qtApp, &QApplication::quit);
     auto* viewMenu = menuBar->addMenu("&View");
+    mainWindow.statusBar()->showMessage("Right-click on the earth to add waypoints");
 
-    mainWindow.statusBar()->showMessage("Right-click on the earth to place markers");
-
-    // Dock Manager
     ads::CDockManager::setConfigFlag(ads::CDockManager::OpaqueSplitterResize, true);
     ads::CDockManager::setConfigFlag(ads::CDockManager::FocusHighlighting, true);
-    ads::CDockManager* dockManager = new ads::CDockManager(&mainWindow);
+    auto* dockManager = new ads::CDockManager(&mainWindow);
 
-    // --- Dock 1: Rocky Earth View ---
+    // ── Earth View (center) ─────────────────────────────────────────
+
     auto* rockyContent = new RockyDockContent(app);
     auto* rockyDock = new ads::CDockWidget(dockManager, "Earth View");
     rockyDock->setWidget(rockyContent);
     rockyDock->setMinimumSizeHintMode(ads::CDockWidget::MinimumSizeHintFromContent);
     dockManager->addDockWidget(ads::CenterDockWidgetArea, rockyDock);
 
-    // --- Dock 2: Marker List ---
-    auto* markerTree = new QTreeWidget();
-    markerTree->setHeaderLabels({"#", "Latitude", "Longitude", "Altitude (m)"});
-    markerTree->setAlternatingRowColors(true);
-    markerTree->setRootIsDecorated(false);
-    markerTree->setColumnWidth(0, 40);
-    markerTree->setColumnWidth(1, 130);
-    markerTree->setColumnWidth(2, 130);
+    // ── Flight Settings (left) ──────────────────────────────────────
 
-    auto* markerDock = new ads::CDockWidget(dockManager, "Markers");
-    markerDock->setWidget(markerTree);
-    dockManager->addDockWidget(ads::RightDockWidgetArea, markerDock);
+    auto* settingsWidget = new QWidget();
+    auto* settingsLayout = new QVBoxLayout(settingsWidget);
 
-    // --- Dock 3: Log Output ---
-    auto* logOutput = new QTextEdit();
-    logOutput->setReadOnly(true);
-    logOutput->setStyleSheet(
-        "QTextEdit { background-color: #1e1e1e; color: #dcdcdc; font-family: monospace; font-size: 12px; }");
-    logOutput->append("[INFO] Application started");
-    logOutput->append("[INFO] Right-click on the earth to place markers");
+    auto* altGroup = new QGroupBox("Waypoint Altitude");
+    auto* altForm = new QFormLayout(altGroup);
 
-    auto* logDock = new ads::CDockWidget(dockManager, "Output Log");
-    logDock->setWidget(logOutput);
-    dockManager->addDockWidget(ads::BottomDockWidgetArea, logDock);
+    auto* altSpin = new QDoubleSpinBox();
+    altSpin->setRange(0, 60000);
+    altSpin->setValue(5000);
+    altSpin->setSuffix(" ft");
+    altSpin->setDecimals(0);
+    altSpin->setSingleStep(500);
+    altForm->addRow("Altitude:", altSpin);
+
+    auto* altTypeCombo = new QComboBox();
+    altTypeCombo->addItems({"MSL (Mean Sea Level)", "AGL (Above Ground Level)"});
+    altForm->addRow("Reference:", altTypeCombo);
+
+    settingsLayout->addWidget(altGroup);
+
+    auto* spdGroup = new QGroupBox("Speed");
+    auto* spdForm = new QFormLayout(spdGroup);
+
+    auto* speedSpin = new QDoubleSpinBox();
+    speedSpin->setRange(10, 2000);
+    speedSpin->setValue(250);
+    speedSpin->setSuffix(" kts");
+    speedSpin->setDecimals(0);
+    speedSpin->setSingleStep(10);
+    spdForm->addRow("Speed:", speedSpin);
+
+    settingsLayout->addWidget(spdGroup);
+
+    auto* clearBtn = new QPushButton("Clear Flight Plan");
+    settingsLayout->addWidget(clearBtn);
+    settingsLayout->addStretch();
+
+    auto* settingsDock = new ads::CDockWidget(dockManager, "Flight Settings");
+    settingsDock->setWidget(settingsWidget);
+    settingsDock->setMinimumSizeHintMode(ads::CDockWidget::MinimumSizeHintFromContent);
+    dockManager->addDockWidget(ads::LeftDockWidgetArea, settingsDock);
+
+    // Sync spinboxes to global settings
+    QObject::connect(altSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        [](double v) { g_settings.altitude.store(v); });
+    QObject::connect(altTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+        [](int i) { g_settings.isMSL.store(i == 0); });
+    QObject::connect(speedSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        [](double v) { g_settings.speedKnots.store(v); });
+
+    // ── Waypoint Table (right) ──────────────────────────────────────
+
+    auto* wpTree = new QTreeWidget();
+    wpTree->setHeaderLabels({"WP", "Lat", "Lon", "Alt (ft)", "Ref", "Speed (kts)"});
+    wpTree->setAlternatingRowColors(true);
+    wpTree->setRootIsDecorated(false);
+    wpTree->header()->setStretchLastSection(true);
+
+    auto* wpDock = new ads::CDockWidget(dockManager, "Waypoints");
+    wpDock->setWidget(wpTree);
+    dockManager->addDockWidget(ads::RightDockWidgetArea, wpDock);
+
+    // ── Flight Plan Text (bottom) ───────────────────────────────────
+
+    auto* planText = new QTextEdit();
+    planText->setReadOnly(true);
+    planText->setStyleSheet(
+        "QTextEdit {"
+        "  background-color: #1a1a2e; color: #e0e0e0;"
+        "  font-family: monospace; font-size: 12px;"
+        "}");
+    planText->setPlainText("(empty flight plan)");
+
+    auto* planDock = new ads::CDockWidget(dockManager, "Flight Plan");
+    planDock->setWidget(planText);
+    dockManager->addDockWidget(ads::BottomDockWidgetArea, planDock);
 
     // View menu toggles
     viewMenu->addAction(rockyDock->toggleViewAction());
-    viewMenu->addAction(markerDock->toggleViewAction());
-    viewMenu->addAction(logDock->toggleViewAction());
+    viewMenu->addAction(settingsDock->toggleViewAction());
+    viewMenu->addAction(wpDock->toggleViewAction());
+    viewMenu->addAction(planDock->toggleViewAction());
 
-    // Clear markers action
-    int markerCount = 0;
-    fileMenu->addSeparator();
-    fileMenu->addAction("&Clear Markers", [&]() {
-        app.registry.write([&](entt::registry& r) {
-            for (int i = 0; i < markerTree->topLevelItemCount(); i++)
+    // ── Flight plan state ───────────────────────────────────────────
+
+    std::vector<Waypoint> waypoints;
+    entt::entity routeLineEntity = entt::null;
+
+    // Lambda to rebuild the route line on the globe
+    auto updateRouteLine = [&]()
+    {
+        app.registry.write([&](entt::registry& r)
+        {
+            // Destroy old line
+            if (routeLineEntity != entt::null && r.valid(routeLineEntity))
+                r.destroy(routeLineEntity);
+            routeLineEntity = entt::null;
+
+            if (waypoints.size() < 2) return;
+
+            routeLineEntity = r.create();
+
+            auto& geom = r.emplace<LineGeometry>(routeLineEntity);
+            geom.topology = LineTopology::Strip;
+            geom.srs = SRS::WGS84;
+
+            for (auto& wp : waypoints)
             {
-                auto entityId = markerTree->topLevelItem(i)->data(0, Qt::UserRole).toUInt();
-                auto entity = static_cast<entt::entity>(entityId);
-                if (r.valid(entity))
-                    r.destroy(entity);
+                double altMSL = wp.isMSL
+                    ? wp.flightAlt * 0.3048
+                    : wp.terrainAlt + wp.flightAlt * 0.3048;
+                geom.points.emplace_back(wp.lon, wp.lat, altMSL);
             }
+
+            auto& style = r.emplace<LineStyle>(routeLineEntity);
+            style.color = Color(0.2f, 0.8f, 1.0f, 0.9f); // cyan
+            style.width = 3.0f;
+            style.depthOffset = 10000.0f;
+            style.resolution = 1000.0f; // subdivide for great-circle appearance
+
+            r.emplace<Line>(routeLineEntity, geom, style);
             app.vsgcontext->requestFrame();
         });
-        markerTree->clear();
-        markerCount = 0;
-        logOutput->append("[INFO] All markers cleared");
-        mainWindow.statusBar()->showMessage("Markers cleared");
+    };
+
+    // Clear flight plan
+    QObject::connect(clearBtn, &QPushButton::clicked, [&]() {
+        app.registry.write([&](entt::registry& r) {
+            for (auto& wp : waypoints)
+                if (wp.pointEntity != entt::null && r.valid(wp.pointEntity))
+                    r.destroy(wp.pointEntity);
+            if (routeLineEntity != entt::null && r.valid(routeLineEntity))
+                r.destroy(routeLineEntity);
+            routeLineEntity = entt::null;
+            app.vsgcontext->requestFrame();
+        });
+        waypoints.clear();
+        wpTree->clear();
+        planText->setPlainText("(empty flight plan)");
+        g_settings.nextIndex.store(1);
+        mainWindow.statusBar()->showMessage("Flight plan cleared");
     });
 
-    // Timer to poll the marker queue and update Qt widgets
+    // ── Poll timer ──────────────────────────────────────────────────
+
     QTimer pollTimer;
     QObject::connect(&pollTimer, &QTimer::timeout, [&]() {
-        MarkerInfo m;
-        while (g_markerQueue.pop(m))
+        Waypoint wp;
+        bool changed = false;
+
+        while (g_wpQueue.pop(wp))
         {
-            markerCount++;
+            waypoints.push_back(wp);
+            changed = true;
 
-            auto latDir = m.lat >= 0 ? "N" : "S";
-            auto lonDir = m.lon >= 0 ? "E" : "W";
+            auto latDir = wp.lat >= 0 ? "N" : "S";
+            auto lonDir = wp.lon >= 0 ? "E" : "W";
 
-            // Add to marker list
             auto* item = new QTreeWidgetItem({
-                QString::number(markerCount),
-                QString("%1 %2").arg(QString::number(std::abs(m.lat), 'f', 6)).arg(latDir),
-                QString("%1 %2").arg(QString::number(std::abs(m.lon), 'f', 6)).arg(lonDir),
-                QString::number(m.alt, 'f', 1)
+                QString("WP%1").arg(wp.index, 2, 10, QChar('0')),
+                QString("%1 %2").arg(QString::number(std::abs(wp.lat), 'f', 5)).arg(latDir),
+                QString("%1 %2").arg(QString::number(std::abs(wp.lon), 'f', 5)).arg(lonDir),
+                QString::number(wp.flightAlt, 'f', 0),
+                wp.isMSL ? "MSL" : "AGL",
+                QString::number(wp.speedKnots, 'f', 0)
             });
-            item->setData(0, Qt::UserRole, static_cast<unsigned int>(m.entity));
-            markerTree->addTopLevelItem(item);
-            markerTree->scrollToBottom();
+            wpTree->addTopLevelItem(item);
+            wpTree->scrollToBottom();
 
-            // Update overlay
-            rockyContent->overlay()->showMarker(m.lon, m.lat, m.alt, markerCount);
+            rockyContent->overlay()->showWaypoint(wp);
 
-            // Log it
-            logOutput->append(QString("[MARKER %1] %2%3, %4%5  Alt: %6m")
-                .arg(markerCount)
-                .arg(QString::number(std::abs(m.lat), 'f', 6)).arg(latDir)
-                .arg(QString::number(std::abs(m.lon), 'f', 6)).arg(lonDir)
-                .arg(QString::number(m.alt, 'f', 1)));
-
-            // Status bar
             mainWindow.statusBar()->showMessage(
-                QString("Marker %1 placed at %2%3, %4%5")
-                    .arg(markerCount)
-                    .arg(QString::number(std::abs(m.lat), 'f', 4)).arg(latDir)
-                    .arg(QString::number(std::abs(m.lon), 'f', 4)).arg(lonDir));
+                QString("WP%1 added - %2 waypoints in plan")
+                    .arg(wp.index, 2, 10, QChar('0'))
+                    .arg(waypoints.size()));
+        }
+
+        if (changed)
+        {
+            planText->setPlainText(formatFlightPlan(waypoints));
+            updateRouteLine();
         }
     });
     pollTimer.start(50);
