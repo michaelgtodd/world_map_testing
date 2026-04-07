@@ -5,7 +5,7 @@
  * with Qt widgets overlaid on the Rocky view.
  *
  * Right-click on the earth to add waypoints to a flight plan.
- * Configure altitude (MSL/AGL) and speed (knots) before clicking.
+ * Configure altitude (MSL/AGL) and speed (knots) via the overlay HUD.
  */
 
 #include <rocky/rocky.h>
@@ -19,12 +19,10 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QDoubleSpinBox>
-#include <QSpinBox>
 #include <QTextEdit>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QComboBox>
-#include <QGroupBox>
 #include <QStatusBar>
 #include <QMenuBar>
 #include <QTimer>
@@ -49,13 +47,12 @@ struct Waypoint
     int index;
     double lon, lat;
     double terrainAlt;     // ground elevation at click point (meters)
-    double flightAlt;      // pilot-entered altitude value
+    double flightAlt;      // pilot-entered altitude value (feet)
     bool isMSL;            // true=MSL, false=AGL
     double speedKnots;
     entt::entity pointEntity = entt::null;
 };
 
-// Thread-safe queue to pass click data from VSG to Qt
 class WaypointQueue
 {
 public:
@@ -79,7 +76,6 @@ private:
 
 static WaypointQueue g_wpQueue;
 
-// Shared settings the event handler reads (written by Qt thread)
 struct FlightSettings
 {
     std::atomic<double> altitude{5000.0};
@@ -89,6 +85,74 @@ struct FlightSettings
 };
 
 static FlightSettings g_settings;
+
+// ── Geodesic helpers ────────────────────────────────────────────────
+
+static constexpr double DEG2RAD = M_PI / 180.0;
+static constexpr double RAD2DEG = 180.0 / M_PI;
+static constexpr double EARTH_R_NM = 3440.065;
+
+static double haversineNm(double lat1, double lon1, double lat2, double lon2)
+{
+    double dLat = (lat2 - lat1) * DEG2RAD;
+    double dLon = (lon2 - lon1) * DEG2RAD;
+    double a = std::sin(dLat / 2) * std::sin(dLat / 2) +
+               std::cos(lat1 * DEG2RAD) * std::cos(lat2 * DEG2RAD) *
+               std::sin(dLon / 2) * std::sin(dLon / 2);
+    return EARTH_R_NM * 2.0 * std::atan2(std::sqrt(a), std::sqrt(1.0 - a));
+}
+
+static double bearingDeg(double lat1, double lon1, double lat2, double lon2)
+{
+    double dLon = (lon2 - lon1) * DEG2RAD;
+    double la1 = lat1 * DEG2RAD, la2 = lat2 * DEG2RAD;
+    double y = std::sin(dLon) * std::cos(la2);
+    double x = std::cos(la1) * std::sin(la2) - std::sin(la1) * std::cos(la2) * std::cos(dLon);
+    return std::fmod(std::atan2(y, x) * RAD2DEG + 360.0, 360.0);
+}
+
+// Interpolate along a great-circle arc between two lat/lon points.
+// Returns intermediate points (excluding start, including end).
+static void interpolateGreatCircle(
+    double lat1, double lon1, double alt1,
+    double lat2, double lon2, double alt2,
+    double maxSegmentNm,
+    std::vector<glm::dvec3>& out)
+{
+    double distNm = haversineNm(lat1, lon1, lat2, lon2);
+    int segments = std::max(1, static_cast<int>(std::ceil(distNm / maxSegmentNm)));
+
+    double phi1 = lat1 * DEG2RAD, lam1 = lon1 * DEG2RAD;
+    double phi2 = lat2 * DEG2RAD, lam2 = lon2 * DEG2RAD;
+
+    // Angular distance on the unit sphere
+    double d = 2.0 * std::asin(std::sqrt(
+        std::pow(std::sin((phi2 - phi1) / 2), 2) +
+        std::cos(phi1) * std::cos(phi2) * std::pow(std::sin((lam2 - lam1) / 2), 2)));
+
+    if (d < 1e-12)
+    {
+        out.emplace_back(lon2, lat2, alt2);
+        return;
+    }
+
+    for (int i = 1; i <= segments; i++)
+    {
+        double f = static_cast<double>(i) / segments;
+        double A = std::sin((1.0 - f) * d) / std::sin(d);
+        double B = std::sin(f * d) / std::sin(d);
+
+        double x = A * std::cos(phi1) * std::cos(lam1) + B * std::cos(phi2) * std::cos(lam2);
+        double y = A * std::cos(phi1) * std::sin(lam1) + B * std::cos(phi2) * std::sin(lam2);
+        double z = A * std::sin(phi1) + B * std::sin(phi2);
+
+        double lat = std::atan2(z, std::sqrt(x * x + y * y)) * RAD2DEG;
+        double lon = std::atan2(y, x) * RAD2DEG;
+        double alt = alt1 + f * (alt2 - alt1); // linear altitude interpolation
+
+        out.emplace_back(lon, lat, alt);
+    }
+}
 
 // ── VSG right-click handler ─────────────────────────────────────────
 
@@ -116,10 +180,8 @@ public:
         double speed = g_settings.speedKnots.load();
         int idx = g_settings.nextIndex.fetch_add(1);
 
-        // Compute display altitude in meters MSL for the point marker
         double markerAltMSL = isMSL ? flightAlt * 0.3048 : terrainAlt + flightAlt * 0.3048;
 
-        // Create a point marker on the globe
         entt::entity entity = entt::null;
         app->registry.write([&](entt::registry& r)
         {
@@ -130,7 +192,7 @@ public:
             geom.points.emplace_back(lon, lat, markerAltMSL);
 
             auto& style = r.emplace<PointStyle>(entity);
-            style.color = Color(0.2f, 0.6f, 1.0f, 1.0f); // blue
+            style.color = Color(0.2f, 0.6f, 1.0f, 1.0f);
             style.width = 10.0f;
             style.antialias = 0.5f;
             style.depthOffset = 10000.0f;
@@ -158,57 +220,175 @@ public:
     }
 };
 
-// ── Overlay widget on the Rocky view ────────────────────────────────
+// ── HUD overlay: flight settings + last waypoint ────────────────────
 
-class RockyOverlayWidget : public QWidget
+class FlightHUD : public QWidget
 {
     Q_OBJECT
 public:
-    explicit RockyOverlayWidget(QWidget* parent = nullptr) : QWidget(parent)
+    explicit FlightHUD(QWidget* parent = nullptr) : QWidget(parent)
     {
-        setAttribute(Qt::WA_TransparentForMouseEvents, true);
         setAttribute(Qt::WA_TranslucentBackground, true);
         setStyleSheet("background: transparent;");
 
-        auto* layout = new QVBoxLayout(this);
-        layout->setContentsMargins(10, 10, 10, 10);
-        layout->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+        auto* outerLayout = new QVBoxLayout(this);
+        outerLayout->setContentsMargins(0, 0, 0, 0);
 
-        QString labelStyle =
+        // ── Top-left: instructions + last WP ────────────────────────
+        auto* topRow = new QHBoxLayout();
+        topRow->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+
+        auto* infoCol = new QVBoxLayout();
+        infoCol->setContentsMargins(12, 12, 12, 0);
+        infoCol->setSpacing(6);
+
+        QString infoStyle =
             "QLabel {"
             "  background-color: rgba(0, 0, 0, 180);"
             "  color: #00ff88;"
-            "  font-family: monospace;"
-            "  font-size: 13px;"
-            "  padding: 6px 10px;"
-            "  border-radius: 4px;"
+            "  font-family: 'Consolas', 'Menlo', monospace;"
+            "  font-size: 12px;"
+            "  padding: 5px 8px;"
+            "  border-radius: 3px;"
             "}";
 
-        instructionLabel_ = new QLabel("Right-click on the earth to add waypoints");
-        instructionLabel_->setStyleSheet(labelStyle);
-        layout->addWidget(instructionLabel_);
+        instructionLabel_ = new QLabel("Right-click earth to add waypoints");
+        instructionLabel_->setStyleSheet(infoStyle);
+        infoCol->addWidget(instructionLabel_);
 
         lastWpLabel_ = new QLabel("");
         lastWpLabel_->setStyleSheet(
             "QLabel {"
             "  background-color: rgba(0, 0, 0, 180);"
             "  color: #ffcc00;"
-            "  font-family: monospace;"
-            "  font-size: 13px;"
-            "  font-weight: bold;"
-            "  padding: 8px 12px;"
-            "  border-radius: 4px;"
-            "  border: 1px solid rgba(255, 204, 0, 100);"
+            "  font-family: 'Consolas', 'Menlo', monospace;"
+            "  font-size: 12px;"
+            "  padding: 5px 8px;"
+            "  border-radius: 3px;"
+            "  border: 1px solid rgba(255, 204, 0, 80);"
             "}");
         lastWpLabel_->setVisible(false);
-        layout->addWidget(lastWpLabel_);
-        layout->addStretch();
+        infoCol->addWidget(lastWpLabel_);
+        infoCol->addStretch();
+
+        topRow->addLayout(infoCol);
+        topRow->addStretch();
+
+        // ── Top-right: flight settings panel ────────────────────────
+        auto* settingsPanel = new QWidget();
+        settingsPanel->setFixedWidth(240);
+        settingsPanel->setStyleSheet(
+            "QWidget#settingsPanel {"
+            "  background-color: rgba(10, 15, 30, 210);"
+            "  border: 1px solid rgba(60, 140, 255, 120);"
+            "  border-radius: 6px;"
+            "}"
+            "QLabel {"
+            "  background: transparent;"
+            "  color: #8899bb;"
+            "  font-family: 'Consolas', 'Menlo', monospace;"
+            "  font-size: 11px;"
+            "}"
+            "QDoubleSpinBox, QComboBox {"
+            "  background-color: rgba(20, 25, 45, 230);"
+            "  color: #00ccff;"
+            "  border: 1px solid rgba(60, 140, 255, 80);"
+            "  border-radius: 3px;"
+            "  padding: 3px 6px;"
+            "  font-family: 'Consolas', 'Menlo', monospace;"
+            "  font-size: 12px;"
+            "  font-weight: bold;"
+            "}"
+            "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {"
+            "  width: 16px;"
+            "  background: rgba(40, 60, 100, 200);"
+            "  border: 1px solid rgba(60, 140, 255, 60);"
+            "}"
+            "QPushButton {"
+            "  background-color: rgba(60, 30, 30, 200);"
+            "  color: #ff6666;"
+            "  border: 1px solid rgba(255, 80, 80, 100);"
+            "  border-radius: 3px;"
+            "  padding: 4px 8px;"
+            "  font-family: 'Consolas', 'Menlo', monospace;"
+            "  font-size: 11px;"
+            "}"
+            "QPushButton:hover {"
+            "  background-color: rgba(100, 40, 40, 220);"
+            "}");
+        settingsPanel->setObjectName("settingsPanel");
+
+        auto* sLayout = new QVBoxLayout(settingsPanel);
+        sLayout->setContentsMargins(10, 8, 10, 8);
+        sLayout->setSpacing(4);
+
+        auto* titleLabel = new QLabel("FLIGHT SETTINGS");
+        titleLabel->setStyleSheet(
+            "QLabel { color: #4488cc; font-weight: bold; font-size: 11px;"
+            "  letter-spacing: 2px; background: transparent; }");
+        titleLabel->setAlignment(Qt::AlignCenter);
+        sLayout->addWidget(titleLabel);
+
+        auto* sep1 = new QLabel("");
+        sep1->setFixedHeight(1);
+        sep1->setStyleSheet("QLabel { background: rgba(60, 140, 255, 60); }");
+        sLayout->addWidget(sep1);
+
+        auto* altLabel = new QLabel("ALTITUDE");
+        sLayout->addWidget(altLabel);
+        altSpin_ = new QDoubleSpinBox();
+        altSpin_->setRange(0, 60000);
+        altSpin_->setValue(5000);
+        altSpin_->setSuffix(" ft");
+        altSpin_->setDecimals(0);
+        altSpin_->setSingleStep(500);
+        altSpin_->setButtonSymbols(QDoubleSpinBox::PlusMinus);
+        sLayout->addWidget(altSpin_);
+
+        altTypeCombo_ = new QComboBox();
+        altTypeCombo_->addItems({"MSL", "AGL"});
+        sLayout->addWidget(altTypeCombo_);
+
+        sLayout->addSpacing(4);
+
+        auto* spdLabel = new QLabel("SPEED");
+        sLayout->addWidget(spdLabel);
+        speedSpin_ = new QDoubleSpinBox();
+        speedSpin_->setRange(10, 2000);
+        speedSpin_->setValue(250);
+        speedSpin_->setSuffix(" kts");
+        speedSpin_->setDecimals(0);
+        speedSpin_->setSingleStep(10);
+        speedSpin_->setButtonSymbols(QDoubleSpinBox::PlusMinus);
+        sLayout->addWidget(speedSpin_);
+
+        sLayout->addSpacing(6);
+
+        clearBtn_ = new QPushButton("CLEAR PLAN");
+        sLayout->addWidget(clearBtn_);
+
+        auto* settingsContainer = new QVBoxLayout();
+        settingsContainer->setContentsMargins(0, 12, 12, 0);
+        settingsContainer->addWidget(settingsPanel);
+        settingsContainer->addStretch();
+
+        topRow->addLayout(settingsContainer);
+        outerLayout->addLayout(topRow);
+        outerLayout->addStretch();
+
+        // Connect spinboxes to global settings
+        connect(altSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            [](double v) { g_settings.altitude.store(v); });
+        connect(altTypeCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            [](int i) { g_settings.isMSL.store(i == 0); });
+        connect(speedSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            [](double v) { g_settings.speedKnots.store(v); });
     }
 
     void showWaypoint(const Waypoint& wp)
     {
-        lastWpLabel_->setText(QString("WP%1: %2%3 %4%5  %6ft %7  %8 kts")
-            .arg(wp.index)
+        lastWpLabel_->setText(QString("WP%1  %2%3 %4%5  %6ft %7  %8kts")
+            .arg(wp.index, 2, 10, QChar('0'))
             .arg(QString::number(std::abs(wp.lat), 'f', 4))
             .arg(wp.lat >= 0 ? "N" : "S")
             .arg(QString::number(std::abs(wp.lon), 'f', 4))
@@ -219,9 +399,41 @@ public:
         lastWpLabel_->setVisible(true);
     }
 
+    QPushButton* clearButton() { return clearBtn_; }
+
+protected:
+    // Let mouse events pass through to the Rocky view, except on interactive widgets
+    bool event(QEvent* e) override
+    {
+        if (e->type() == QEvent::MouseButtonPress ||
+            e->type() == QEvent::MouseButtonRelease ||
+            e->type() == QEvent::MouseMove ||
+            e->type() == QEvent::Wheel)
+        {
+            // Check if the event is over an interactive child widget
+            auto* me = static_cast<QMouseEvent*>(e);
+            QWidget* child = childAt(me->pos());
+            if (child && (qobject_cast<QDoubleSpinBox*>(child) ||
+                          qobject_cast<QComboBox*>(child) ||
+                          qobject_cast<QPushButton*>(child) ||
+                          qobject_cast<QAbstractSpinBox*>(child)))
+            {
+                return QWidget::event(e); // handle normally
+            }
+            // Otherwise pass through to Rocky view underneath
+            e->ignore();
+            return false;
+        }
+        return QWidget::event(e);
+    }
+
 private:
     QLabel* instructionLabel_;
     QLabel* lastWpLabel_;
+    QDoubleSpinBox* altSpin_;
+    QComboBox* altTypeCombo_;
+    QDoubleSpinBox* speedSpin_;
+    QPushButton* clearBtn_;
 };
 
 // ── Rocky dock content ──────────────────────────────────────────────
@@ -244,51 +456,29 @@ public:
         rockyWindow_->initializeWindow();
         app_.display.addWindow(rockyWindow_->windowAdapter);
 
-        overlay_ = new RockyOverlayWidget(rockyWidget_);
-        overlay_->raise();
+        hud_ = new FlightHUD(rockyWidget_);
+        hud_->raise();
     }
 
-    RockyOverlayWidget* overlay() { return overlay_; }
+    FlightHUD* hud() { return hud_; }
 
 protected:
     void resizeEvent(QResizeEvent* event) override
     {
         QWidget::resizeEvent(event);
-        if (overlay_ && rockyWidget_)
-            overlay_->setGeometry(rockyWidget_->rect());
+        if (hud_ && rockyWidget_)
+            hud_->setGeometry(rockyWidget_->rect());
     }
 
 private:
     rocky::Application& app_;
     vsgQt::Window* rockyWindow_ = nullptr;
     QWidget* rockyWidget_ = nullptr;
-    RockyOverlayWidget* overlay_ = nullptr;
+    FlightHUD* hud_ = nullptr;
 };
 
-// ── Helpers ─────────────────────────────────────────────────────────
+// ── Flight plan formatter ───────────────────────────────────────────
 
-static double haversineNm(double lat1, double lon1, double lat2, double lon2)
-{
-    constexpr double R = 3440.065; // earth radius in nautical miles
-    double dLat = (lat2 - lat1) * M_PI / 180.0;
-    double dLon = (lon2 - lon1) * M_PI / 180.0;
-    double a = std::sin(dLat / 2) * std::sin(dLat / 2) +
-               std::cos(lat1 * M_PI / 180.0) * std::cos(lat2 * M_PI / 180.0) *
-               std::sin(dLon / 2) * std::sin(dLon / 2);
-    return R * 2.0 * std::atan2(std::sqrt(a), std::sqrt(1.0 - a));
-}
-
-static double bearingDeg(double lat1, double lon1, double lat2, double lon2)
-{
-    double dLon = (lon2 - lon1) * M_PI / 180.0;
-    double la1 = lat1 * M_PI / 180.0, la2 = lat2 * M_PI / 180.0;
-    double y = std::sin(dLon) * std::cos(la2);
-    double x = std::cos(la1) * std::sin(la2) - std::sin(la1) * std::cos(la2) * std::cos(dLon);
-    double brg = std::atan2(y, x) * 180.0 / M_PI;
-    return std::fmod(brg + 360.0, 360.0);
-}
-
-// Format the flight plan as a readable text block
 static QString formatFlightPlan(const std::vector<Waypoint>& wps)
 {
     if (wps.empty()) return "(empty flight plan)";
@@ -299,7 +489,7 @@ static QString formatFlightPlan(const std::vector<Waypoint>& wps)
     text += QString("").fill('=', 72) + "\n\n";
 
     double totalDist = 0;
-    double totalTime = 0; // hours
+    double totalTime = 0;
 
     for (size_t i = 0; i < wps.size(); i++)
     {
@@ -386,7 +576,7 @@ int main(int argc, char** argv)
 
     QMainWindow mainWindow;
     mainWindow.setWindowTitle("Rocky Flight Planner");
-    mainWindow.resize(1400, 850);
+    mainWindow.resize(1600, 900);
 
     auto* menuBar = mainWindow.menuBar();
     auto* fileMenu = menuBar->addMenu("&File");
@@ -398,86 +588,35 @@ int main(int argc, char** argv)
     ads::CDockManager::setConfigFlag(ads::CDockManager::FocusHighlighting, true);
     auto* dockManager = new ads::CDockManager(&mainWindow);
 
-    // ── Earth View (center) ─────────────────────────────────────────
+    // ── Earth View (center) — dominant area ─────────────────────────
 
     auto* rockyContent = new RockyDockContent(app);
     auto* rockyDock = new ads::CDockWidget(dockManager, "Earth View");
     rockyDock->setWidget(rockyContent);
     rockyDock->setMinimumSizeHintMode(ads::CDockWidget::MinimumSizeHintFromContent);
-    dockManager->addDockWidget(ads::CenterDockWidgetArea, rockyDock);
+    auto* centerArea = dockManager->addDockWidget(ads::CenterDockWidgetArea, rockyDock);
 
-    // ── Flight Settings (left) ──────────────────────────────────────
-
-    auto* settingsWidget = new QWidget();
-    auto* settingsLayout = new QVBoxLayout(settingsWidget);
-
-    auto* altGroup = new QGroupBox("Waypoint Altitude");
-    auto* altForm = new QFormLayout(altGroup);
-
-    auto* altSpin = new QDoubleSpinBox();
-    altSpin->setRange(0, 60000);
-    altSpin->setValue(5000);
-    altSpin->setSuffix(" ft");
-    altSpin->setDecimals(0);
-    altSpin->setSingleStep(500);
-    altForm->addRow("Altitude:", altSpin);
-
-    auto* altTypeCombo = new QComboBox();
-    altTypeCombo->addItems({"MSL (Mean Sea Level)", "AGL (Above Ground Level)"});
-    altForm->addRow("Reference:", altTypeCombo);
-
-    settingsLayout->addWidget(altGroup);
-
-    auto* spdGroup = new QGroupBox("Speed");
-    auto* spdForm = new QFormLayout(spdGroup);
-
-    auto* speedSpin = new QDoubleSpinBox();
-    speedSpin->setRange(10, 2000);
-    speedSpin->setValue(250);
-    speedSpin->setSuffix(" kts");
-    speedSpin->setDecimals(0);
-    speedSpin->setSingleStep(10);
-    spdForm->addRow("Speed:", speedSpin);
-
-    settingsLayout->addWidget(spdGroup);
-
-    auto* clearBtn = new QPushButton("Clear Flight Plan");
-    settingsLayout->addWidget(clearBtn);
-    settingsLayout->addStretch();
-
-    auto* settingsDock = new ads::CDockWidget(dockManager, "Flight Settings");
-    settingsDock->setWidget(settingsWidget);
-    settingsDock->setMinimumSizeHintMode(ads::CDockWidget::MinimumSizeHintFromContent);
-    dockManager->addDockWidget(ads::LeftDockWidgetArea, settingsDock);
-
-    // Sync spinboxes to global settings
-    QObject::connect(altSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-        [](double v) { g_settings.altitude.store(v); });
-    QObject::connect(altTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-        [](int i) { g_settings.isMSL.store(i == 0); });
-    QObject::connect(speedSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-        [](double v) { g_settings.speedKnots.store(v); });
-
-    // ── Waypoint Table (right) ──────────────────────────────────────
+    // ── Waypoint Table (right, narrow) ──────────────────────────────
 
     auto* wpTree = new QTreeWidget();
-    wpTree->setHeaderLabels({"WP", "Lat", "Lon", "Alt (ft)", "Ref", "Speed (kts)"});
+    wpTree->setHeaderLabels({"WP", "Lat", "Lon", "Alt", "Ref", "Kts"});
     wpTree->setAlternatingRowColors(true);
     wpTree->setRootIsDecorated(false);
     wpTree->header()->setStretchLastSection(true);
+    wpTree->setStyleSheet("QTreeWidget { font-family: monospace; font-size: 11px; }");
 
     auto* wpDock = new ads::CDockWidget(dockManager, "Waypoints");
     wpDock->setWidget(wpTree);
-    dockManager->addDockWidget(ads::RightDockWidgetArea, wpDock);
+    auto* rightArea = dockManager->addDockWidget(ads::RightDockWidgetArea, wpDock);
 
-    // ── Flight Plan Text (bottom) ───────────────────────────────────
+    // ── Flight Plan Text (bottom, shorter) ──────────────────────────
 
     auto* planText = new QTextEdit();
     planText->setReadOnly(true);
     planText->setStyleSheet(
         "QTextEdit {"
         "  background-color: #1a1a2e; color: #e0e0e0;"
-        "  font-family: monospace; font-size: 12px;"
+        "  font-family: 'Consolas', 'Menlo', monospace; font-size: 12px;"
         "}");
     planText->setPlainText("(empty flight plan)");
 
@@ -485,9 +624,13 @@ int main(int argc, char** argv)
     planDock->setWidget(planText);
     dockManager->addDockWidget(ads::BottomDockWidgetArea, planDock);
 
+    // Keep the right panel narrow so the earth view is dominant
+    wpDock->setMinimumSizeHintMode(ads::CDockWidget::MinimumSizeHintFromContent);
+    wpTree->setMinimumWidth(280);
+    wpTree->setMaximumWidth(400);
+
     // View menu toggles
     viewMenu->addAction(rockyDock->toggleViewAction());
-    viewMenu->addAction(settingsDock->toggleViewAction());
     viewMenu->addAction(wpDock->toggleViewAction());
     viewMenu->addAction(planDock->toggleViewAction());
 
@@ -496,12 +639,11 @@ int main(int argc, char** argv)
     std::vector<Waypoint> waypoints;
     entt::entity routeLineEntity = entt::null;
 
-    // Lambda to rebuild the route line on the globe
+    // Build route line with great-circle interpolation
     auto updateRouteLine = [&]()
     {
         app.registry.write([&](entt::registry& r)
         {
-            // Destroy old line
             if (routeLineEntity != entt::null && r.valid(routeLineEntity))
                 r.destroy(routeLineEntity);
             routeLineEntity = entt::null;
@@ -514,19 +656,34 @@ int main(int argc, char** argv)
             geom.topology = LineTopology::Strip;
             geom.srs = SRS::WGS84;
 
-            for (auto& wp : waypoints)
+            // First waypoint
+            auto& wp0 = waypoints[0];
+            double alt0 = wp0.isMSL ? wp0.flightAlt * 0.3048
+                                    : wp0.terrainAlt + wp0.flightAlt * 0.3048;
+            geom.points.emplace_back(wp0.lon, wp0.lat, alt0);
+
+            // Interpolate great-circle segments between consecutive waypoints
+            // Max 50nm per segment keeps arcs smooth on the globe
+            constexpr double MAX_SEG_NM = 50.0;
+            for (size_t i = 1; i < waypoints.size(); i++)
             {
-                double altMSL = wp.isMSL
-                    ? wp.flightAlt * 0.3048
-                    : wp.terrainAlt + wp.flightAlt * 0.3048;
-                geom.points.emplace_back(wp.lon, wp.lat, altMSL);
+                auto& prev = waypoints[i - 1];
+                auto& cur = waypoints[i];
+                double prevAlt = prev.isMSL ? prev.flightAlt * 0.3048
+                                            : prev.terrainAlt + prev.flightAlt * 0.3048;
+                double curAlt = cur.isMSL ? cur.flightAlt * 0.3048
+                                          : cur.terrainAlt + cur.flightAlt * 0.3048;
+
+                interpolateGreatCircle(
+                    prev.lat, prev.lon, prevAlt,
+                    cur.lat, cur.lon, curAlt,
+                    MAX_SEG_NM, geom.points);
             }
 
             auto& style = r.emplace<LineStyle>(routeLineEntity);
-            style.color = Color(0.2f, 0.8f, 1.0f, 0.9f); // cyan
+            style.color = Color(0.2f, 0.8f, 1.0f, 0.9f);
             style.width = 3.0f;
             style.depthOffset = 10000.0f;
-            style.resolution = 1000.0f; // subdivide for great-circle appearance
 
             r.emplace<Line>(routeLineEntity, geom, style);
             app.vsgcontext->requestFrame();
@@ -534,7 +691,7 @@ int main(int argc, char** argv)
     };
 
     // Clear flight plan
-    QObject::connect(clearBtn, &QPushButton::clicked, [&]() {
+    QObject::connect(rockyContent->hud()->clearButton(), &QPushButton::clicked, [&]() {
         app.registry.write([&](entt::registry& r) {
             for (auto& wp : waypoints)
                 if (wp.pointEntity != entt::null && r.valid(wp.pointEntity))
@@ -549,6 +706,11 @@ int main(int argc, char** argv)
         planText->setPlainText("(empty flight plan)");
         g_settings.nextIndex.store(1);
         mainWindow.statusBar()->showMessage("Flight plan cleared");
+    });
+
+    fileMenu->addSeparator();
+    fileMenu->addAction("&Clear Flight Plan", [&]() {
+        rockyContent->hud()->clearButton()->click();
     });
 
     // ── Poll timer ──────────────────────────────────────────────────
@@ -568,8 +730,8 @@ int main(int argc, char** argv)
 
             auto* item = new QTreeWidgetItem({
                 QString("WP%1").arg(wp.index, 2, 10, QChar('0')),
-                QString("%1 %2").arg(QString::number(std::abs(wp.lat), 'f', 5)).arg(latDir),
-                QString("%1 %2").arg(QString::number(std::abs(wp.lon), 'f', 5)).arg(lonDir),
+                QString("%1%2").arg(QString::number(std::abs(wp.lat), 'f', 4)).arg(latDir),
+                QString("%1%2").arg(QString::number(std::abs(wp.lon), 'f', 4)).arg(lonDir),
                 QString::number(wp.flightAlt, 'f', 0),
                 wp.isMSL ? "MSL" : "AGL",
                 QString::number(wp.speedKnots, 'f', 0)
@@ -577,7 +739,7 @@ int main(int argc, char** argv)
             wpTree->addTopLevelItem(item);
             wpTree->scrollToBottom();
 
-            rockyContent->overlay()->showWaypoint(wp);
+            rockyContent->hud()->showWaypoint(wp);
 
             mainWindow.statusBar()->showMessage(
                 QString("WP%1 added - %2 waypoints in plan")
