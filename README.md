@@ -72,7 +72,7 @@ docker/build.sh
 ## Running
 
 ```bash
-./run.sh
+scripts/run.sh
 ```
 
 The run script sets `ROCKY_FILE_PATH` (for shaders/resources) and `QT_QPA_PLATFORM=xcb` (required because vsgQt creates XCB Vulkan surfaces).
@@ -80,9 +80,9 @@ The run script sets `ROCKY_FILE_PATH` (for shaders/resources) and `QT_QPA_PLATFO
 ## Testing
 
 ```bash
-./test.sh                    # run all tests
-./test.sh -R Geodesy         # run only geodesy tests
-ctest --preset default       # via CMake preset
+scripts/test.sh                    # run all tests
+scripts/test.sh -R Geodesy         # run only geodesy tests
+ctest --preset default             # via CMake preset
 ```
 
 ## Usage
@@ -100,24 +100,31 @@ Switch between **FLY TO** and **APPROACH TO HOVER** modes in the floating settin
 ## Project Structure
 
 ```
-main.cpp                        Application entry point and wiring
-Geodesy.h                       Geodesic math (haversine, bearing, great-circle)
-Waypoint.h                      Data types (Waypoint, WaypointQueue, FlightSettings)
-FlightPlan.h/.cpp               Flight plan state, route lines, text formatting
-WaypointHandler.h               VSG right-click event handler
-RockyViewer.h                   Qt-VSG viewer bridge
-widgets/
-  EarthViewPane.h/.cpp          Earth view container + floating overlay management
-  FlightSettingsPanel.h         Settings overlay (altitude, speed, mode)
-  FlightInfoOverlay.h           Last-waypoint info display
-  NavWidget.h                   Zoom/rotate/home navigation buttons
+src/
+  main.cpp                      Application entry point and wiring
+  Geodesy.h                     Geodesic math (haversine, bearing, great-circle)
+  Waypoint.h                    Data types (Waypoint, WaypointQueue, FlightSettings)
+  FlightPlan.h/.cpp             Flight plan state, route lines, text formatting
+  WaypointHandler.h             VSG right-click event handler
+  RockyViewer.h                 Qt-VSG viewer bridge
+  widgets/
+    EarthViewPane.h/.cpp        Earth view container + floating overlay management
+    FlightSettingsPanel.h       Settings overlay (altitude, speed, mode)
+    FlightInfoOverlay.h         Last-waypoint info display
+    NavWidget.h                 Zoom/rotate/home navigation buttons
 tests/
   test_geodesy.cpp              Geodesy function tests (21 tests)
   test_waypoint.cpp             FlightSettings tests
+scripts/
+  run.sh                        Run the application
+  test.sh                       Run unit tests
 docker/
   Dockerfile                    Clean Ubuntu 24.04 build test
   build.sh                      Docker build script
   rocky-imgui-fix.patch         Patches for building Rocky without ImGui
+docs/
+  requirements.md               Feature checklist
+  architecture_notes.md         Architecture and platform quirks
 ```
 
 ## License

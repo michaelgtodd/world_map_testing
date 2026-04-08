@@ -19,16 +19,16 @@ find_package(vsgQt CONFIG REQUIRED)
 # ── Main executable ──────────────────────────────────────────────────
 
 add_executable(${PROJECT_NAME}
-    main.cpp
-    FlightPlan.cpp
-    widgets/EarthViewPane.cpp
+    src/main.cpp
+    src/FlightPlan.cpp
+    src/widgets/EarthViewPane.cpp
     # Headers with Q_OBJECT listed for AUTOMOC (not included by any .cpp)
-    widgets/FlightSettingsPanel.h
-    widgets/FlightInfoOverlay.h
-    widgets/NavWidget.h
+    src/widgets/FlightSettingsPanel.h
+    src/widgets/FlightInfoOverlay.h
+    src/widgets/NavWidget.h
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${PROJECT_SOURCE_DIR})
+target_include_directories(${PROJECT_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/src)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Core
@@ -53,7 +53,7 @@ if(BUILD_TESTS)
         tests/test_waypoint.cpp
     )
 
-    target_include_directories(tests PRIVATE ${PROJECT_SOURCE_DIR})
+    target_include_directories(tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
     target_link_libraries(tests PRIVATE GTest::gtest_main glm::glm)
 
     include(GoogleTest)
