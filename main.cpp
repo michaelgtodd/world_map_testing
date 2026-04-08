@@ -674,6 +674,122 @@ private:
     QLabel* lastWpLabel_;
 };
 
+// ── Navigation widget (zoom/rotate/home) ────────────────────────────
+
+class NavWidget : public QWidget
+{
+    Q_OBJECT
+public:
+    explicit NavWidget(QWidget* parent = nullptr)
+        : QWidget(parent, Qt::FramelessWindowHint | Qt::Tool)
+    {
+        setAttribute(Qt::WA_TranslucentBackground, true);
+        setAttribute(Qt::WA_ShowWithoutActivating, true);
+        setFixedSize(120, 160);
+
+        QString btnStyle =
+            "QPushButton {"
+            "  background-color: rgba(10, 15, 30, 200);"
+            "  color: #88bbdd;"
+            "  border: 1px solid rgba(60, 140, 255, 80);"
+            "  font-family: 'Consolas', 'Menlo', monospace;"
+            "  font-size: 13px;"
+            "  font-weight: bold;"
+            "  min-width: 30px; min-height: 30px;"
+            "}"
+            "QPushButton:hover {"
+            "  background-color: rgba(30, 50, 80, 220);"
+            "  color: #aaddff;"
+            "}"
+            "QPushButton:pressed {"
+            "  background-color: rgba(50, 80, 120, 240);"
+            "}";
+        setStyleSheet(btnStyle);
+
+        auto* grid = new QGridLayout(this);
+        grid->setContentsMargins(4, 4, 4, 4);
+        grid->setSpacing(2);
+
+        // Row 0: rotate up
+        auto* rotUp = new QPushButton(QString::fromUtf8("\xE2\x96\xB2")); // ▲
+        rotUp->setToolTip("Tilt up");
+        grid->addWidget(rotUp, 0, 1);
+
+        // Row 1: rotate left, home, rotate right
+        auto* rotLeft = new QPushButton(QString::fromUtf8("\xE2\x97\x80")); // ◀
+        rotLeft->setToolTip("Rotate left");
+        grid->addWidget(rotLeft, 1, 0);
+
+        auto* homeBtn = new QPushButton(QString::fromUtf8("\xE2\x97\x8F")); // ●
+        homeBtn->setToolTip("Reset view");
+        homeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background-color: rgba(10, 15, 30, 200);"
+            "  color: #44aaff;"
+            "  border: 1px solid rgba(60, 140, 255, 80);"
+            "  border-radius: 15px;"
+            "  font-size: 14px;"
+            "  min-width: 30px; min-height: 30px;"
+            "}"
+            "QPushButton:hover { background-color: rgba(30, 50, 80, 220); }");
+        grid->addWidget(homeBtn, 1, 1);
+
+        auto* rotRight = new QPushButton(QString::fromUtf8("\xE2\x96\xB6")); // ▶
+        rotRight->setToolTip("Rotate right");
+        grid->addWidget(rotRight, 1, 2);
+
+        // Row 2: rotate down
+        auto* rotDown = new QPushButton(QString::fromUtf8("\xE2\x96\xBC")); // ▼
+        rotDown->setToolTip("Tilt down");
+        grid->addWidget(rotDown, 2, 1);
+
+        // Row 3: zoom in / zoom out
+        auto* zoomIn = new QPushButton("+");
+        zoomIn->setToolTip("Zoom in");
+        zoomIn->setStyleSheet(
+            "QPushButton {"
+            "  background-color: rgba(10, 15, 30, 200);"
+            "  color: #66dd88;"
+            "  border: 1px solid rgba(60, 200, 100, 80);"
+            "  font-size: 18px; font-weight: bold;"
+            "  min-width: 30px; min-height: 30px;"
+            "}"
+            "QPushButton:hover { background-color: rgba(20, 40, 30, 220); }");
+        grid->addWidget(zoomIn, 3, 0);
+
+        auto* zoomOut = new QPushButton(QString::fromUtf8("\xE2\x80\x93")); // –
+        zoomOut->setToolTip("Zoom out");
+        zoomOut->setStyleSheet(
+            "QPushButton {"
+            "  background-color: rgba(10, 15, 30, 200);"
+            "  color: #dd8866;"
+            "  border: 1px solid rgba(200, 100, 60, 80);"
+            "  font-size: 18px; font-weight: bold;"
+            "  min-width: 30px; min-height: 30px;"
+            "}"
+            "QPushButton:hover { background-color: rgba(40, 20, 10, 220); }");
+        grid->addWidget(zoomOut, 3, 2);
+
+        connect(rotUp,    &QPushButton::clicked, this, [this]() { emit rotateRequested(0, -0.05); });
+        connect(rotDown,  &QPushButton::clicked, this, [this]() { emit rotateRequested(0,  0.05); });
+        connect(rotLeft,  &QPushButton::clicked, this, [this]() { emit rotateRequested(-0.05, 0); });
+        connect(rotRight, &QPushButton::clicked, this, [this]() { emit rotateRequested( 0.05, 0); });
+        connect(zoomIn,   &QPushButton::clicked, this, [this]() { emit zoomRequested(0, -0.2); });
+        connect(zoomOut,  &QPushButton::clicked, this, [this]() { emit zoomRequested(0,  0.2); });
+        connect(homeBtn,  &QPushButton::clicked, this, [this]() { emit homeRequested(); });
+    }
+
+    void positionOver(const QPoint& topLeft, int yOffset)
+    {
+        move(topLeft.x() + 12, topLeft.y() + yOffset);
+    }
+
+signals:
+    void rotateRequested(double dx, double dy);
+    void zoomRequested(double dx, double dy);
+    void homeRequested();
+};
+
 // ── Rocky dock content ──────────────────────────────────────────────
 
 class RockyDockContent : public QWidget
@@ -696,12 +812,15 @@ public:
 
         settingsPanel_ = new FlightSettingsPanel();
         infoOverlay_ = new FlightInfoOverlay();
+        navWidget_ = new NavWidget();
         settingsPanel_->show();
         infoOverlay_->show();
+        navWidget_->show();
     }
 
     FlightSettingsPanel* settingsPanel() { return settingsPanel_; }
     FlightInfoOverlay* infoOverlay() { return infoOverlay_; }
+    NavWidget* navWidget() { return navWidget_; }
 
 protected:
     void resizeEvent(QResizeEvent* event) override
@@ -720,12 +839,14 @@ protected:
         repositionOverlays();
         if (settingsPanel_) settingsPanel_->show();
         if (infoOverlay_) infoOverlay_->show();
+        if (navWidget_) navWidget_->show();
     }
     void hideEvent(QHideEvent* event) override
     {
         QWidget::hideEvent(event);
         if (settingsPanel_) settingsPanel_->hide();
         if (infoOverlay_) infoOverlay_->hide();
+        if (navWidget_) navWidget_->hide();
     }
 
 private:
@@ -736,6 +857,7 @@ private:
         QPoint tr = rockyWidget_->mapToGlobal(QPoint(rockyWidget_->width(), 0));
         if (settingsPanel_) settingsPanel_->positionOver(tr);
         if (infoOverlay_) infoOverlay_->positionOver(tl);
+        if (navWidget_) navWidget_->positionOver(tl, 80);
     }
 
     rocky::Application& app_;
@@ -743,6 +865,7 @@ private:
     QWidget* rockyWidget_ = nullptr;
     FlightSettingsPanel* settingsPanel_ = nullptr;
     FlightInfoOverlay* infoOverlay_ = nullptr;
+    NavWidget* navWidget_ = nullptr;
 };
 
 // ── Flight plan formatter ───────────────────────────────────────────
@@ -887,6 +1010,41 @@ int main(int argc, char** argv)
     rockyDock->setWidget(rockyContent);
     rockyDock->setMinimumSizeHintMode(ads::CDockWidget::MinimumSizeHintFromContent);
     dockManager->addDockWidget(ads::CenterDockWidgetArea, rockyDock);
+
+    // Rebind Ctrl+Left-drag to rotate (default is pan)
+    // Find the manipulator for the main window/view
+    vsg::ref_ptr<MapManipulator> manip;
+    for (auto& handler : app.viewer->getEventHandlers())
+    {
+        manip = vsg::ref_ptr<MapManipulator>(dynamic_cast<MapManipulator*>(handler.get()));
+        if (manip) break;
+    }
+    if (manip)
+    {
+        manip->settings.bindMouse(
+            MapManipulator::ACTION_ROTATE,
+            MapManipulator::MOUSE_LEFT_BUTTON,
+            vsg::MODKEY_Control);
+    }
+
+    // Connect nav widget to manipulator
+    if (manip)
+    {
+        auto manipRef = manip;
+        auto* nav = rockyContent->navWidget();
+        QObject::connect(nav, &NavWidget::rotateRequested, [manipRef, &app](double dx, double dy) {
+            manipRef->rotate(dx, dy);
+            app.vsgcontext->requestFrame();
+        });
+        QObject::connect(nav, &NavWidget::zoomRequested, [manipRef, &app](double dx, double dy) {
+            manipRef->zoom(dx, dy);
+            app.vsgcontext->requestFrame();
+        });
+        QObject::connect(nav, &NavWidget::homeRequested, [manipRef, &app]() {
+            manipRef->home();
+            app.vsgcontext->requestFrame();
+        });
+    }
 
     auto* wpTree = new QTreeWidget();
     wpTree->setHeaderLabels({"WP", "Type", "Lat", "Lon", "Alt", "Spd"});
