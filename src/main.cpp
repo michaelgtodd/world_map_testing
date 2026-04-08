@@ -123,6 +123,14 @@ int main(int argc, char** argv)
     if (manip)
     {
         earthPane->setManipulator(manip);
+
+        // Start camera above Sikorsky Stratford main plant (6900 Main St, Stratford, CT)
+        rocky::Viewpoint startVP;
+        startVP.point = rocky::GeoPoint(rocky::SRS::WGS84, -73.1318, 41.1876, 0);
+        startVP.pitch = rocky::Angle(-45.0, rocky::Units::DEGREES);
+        startVP.heading = rocky::Angle(0.0, rocky::Units::DEGREES);
+        startVP.range = rocky::Distance(1000.0, rocky::Units::FEET);
+        manip->setViewpoint(startVP);
     }
 
     // Connect nav widget to manipulator
