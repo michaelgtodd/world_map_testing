@@ -26,6 +26,8 @@ add_executable(${PROJECT_NAME}
     widgets/NavWidget.h
 )
 
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR})
+
 target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Core
     Qt6::Gui
@@ -34,3 +36,29 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     rocky::rocky
     vsgQt::vsgQt
 )
+
+# ── Tests ────────────────────────────────────────────────────────────
+
+option(BUILD_TESTS "Build unit tests" ON)
+
+if(BUILD_TESTS)
+    enable_testing()
+    find_package(GTest REQUIRED)
+
+    add_executable(tests
+        tests/test_geodesy.cpp
+        tests/test_waypoint.cpp
+    )
+
+    find_package(glm CONFIG REQUIRED)
+
+    target_include_directories(tests PRIVATE ${CMAKE_SOURCE_DIR})
+
+    target_link_libraries(tests PRIVATE
+        GTest::gtest_main
+        glm::glm
+    )
+
+    include(GoogleTest)
+    gtest_discover_tests(tests)
+endif()
