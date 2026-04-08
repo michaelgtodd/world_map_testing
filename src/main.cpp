@@ -129,7 +129,7 @@ int main(int argc, char** argv)
         startVP.point = rocky::GeoPoint(rocky::SRS::WGS84, -73.09147, 41.25303, 0);
         startVP.pitch = rocky::Angle(-45.0, rocky::Units::DEGREES);
         startVP.heading = rocky::Angle(0.0, rocky::Units::DEGREES);
-        startVP.range = rocky::Distance(1000.0, rocky::Units::FEET);
+        startVP.range = rocky::Distance(2500.0, rocky::Units::FEET);
         manip->setViewpoint(startVP);
     }
 
