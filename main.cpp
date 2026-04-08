@@ -1,11 +1,10 @@
 /**
  * Rocky + Qt Advanced Docking System Demo
  *
- * Embeds a Rocky Vulkan earth view inside a Qt Advanced Docking System pane,
- * with Qt widgets overlaid on the Rocky view.
- *
- * Right-click on the earth to add waypoints to a flight plan.
- * Configure altitude (MSL/AGL) and speed (knots) via the overlay HUD.
+ * Right-click: add FlyTo waypoints or Approach-to-Hover goals.
+ * In Approach mode, click-and-drag to set hover point + inbound bearing.
+ * A 3-degree glideslope is computed from the previous waypoint's altitude
+ * down to 20 ft AGL at the hover point.
  */
 
 #include <rocky/rocky.h>
@@ -44,14 +43,23 @@ using namespace ROCKY_NAMESPACE;
 
 // ── Data structures ─────────────────────────────────────────────────
 
+enum class WPType { FlyTo, ApproachToHover };
+
 struct Waypoint
 {
     int index;
     double lon, lat;
-    double terrainAlt;     // ground elevation at click point (meters)
-    double flightAlt;      // pilot-entered altitude value (feet)
-    bool isMSL;            // true=MSL, false=AGL
+    double terrainAlt;     // ground elevation (meters)
+    double flightAlt;      // altitude value (feet)
+    bool isMSL;
     double speedKnots;
+    WPType type = WPType::FlyTo;
+
+    // Approach-to-hover specific
+    double inboundBearing = 0;   // degrees true
+    double fafLon = 0, fafLat = 0; // final approach fix position
+    double fafAltFt = 0;        // FAF altitude (feet MSL)
+
     entt::entity pointEntity = entt::null;
 };
 
@@ -84,6 +92,9 @@ struct FlightSettings
     std::atomic<bool> isMSL{true};
     std::atomic<double> speedKnots{250.0};
     std::atomic<int> nextIndex{1};
+    std::atomic<int> mode{0}; // 0=FlyTo, 1=ApproachToHover
+    // Previous waypoint altitude in feet MSL (for glideslope calc)
+    std::atomic<double> prevAltFtMSL{5000.0};
 };
 
 static FlightSettings g_settings;
@@ -93,6 +104,11 @@ static FlightSettings g_settings;
 static constexpr double DEG2RAD = M_PI / 180.0;
 static constexpr double RAD2DEG = 180.0 / M_PI;
 static constexpr double EARTH_R_NM = 3440.065;
+static constexpr double EARTH_R_M = 6371000.0;
+static constexpr double FT_TO_M = 0.3048;
+static constexpr double M_TO_FT = 3.28084;
+static constexpr double NM_TO_FT = 6076.12;
+static constexpr double GLIDE_ANGLE_DEG = 3.0;
 
 static double haversineNm(double lat1, double lon1, double lat2, double lon2)
 {
@@ -113,8 +129,23 @@ static double bearingDeg(double lat1, double lon1, double lat2, double lon2)
     return std::fmod(std::atan2(y, x) * RAD2DEG + 360.0, 360.0);
 }
 
-// Interpolate along a great-circle arc between two lat/lon points.
-// Returns intermediate points (excluding start, including end).
+// Compute destination point given start, bearing (deg), and distance (nm)
+static void destPoint(double lat1, double lon1, double bearingDeg_, double distNm,
+                      double& latOut, double& lonOut)
+{
+    double d = distNm / EARTH_R_NM; // angular distance
+    double brg = bearingDeg_ * DEG2RAD;
+    double phi1 = lat1 * DEG2RAD, lam1 = lon1 * DEG2RAD;
+
+    double phi2 = std::asin(std::sin(phi1) * std::cos(d) +
+                            std::cos(phi1) * std::sin(d) * std::cos(brg));
+    double lam2 = lam1 + std::atan2(std::sin(brg) * std::sin(d) * std::cos(phi1),
+                                     std::cos(d) - std::sin(phi1) * std::sin(phi2));
+
+    latOut = phi2 * RAD2DEG;
+    lonOut = lam2 * RAD2DEG;
+}
+
 static void interpolateGreatCircle(
     double lat1, double lon1, double alt1,
     double lat2, double lon2, double alt2,
@@ -127,7 +158,6 @@ static void interpolateGreatCircle(
     double phi1 = lat1 * DEG2RAD, lam1 = lon1 * DEG2RAD;
     double phi2 = lat2 * DEG2RAD, lam2 = lon2 * DEG2RAD;
 
-    // Angular distance on the unit sphere
     double d = 2.0 * std::asin(std::sqrt(
         std::pow(std::sin((phi2 - phi1) / 2), 2) +
         std::cos(phi1) * std::cos(phi2) * std::pow(std::sin((lam2 - lam1) / 2), 2)));
@@ -150,7 +180,7 @@ static void interpolateGreatCircle(
 
         double lat = std::atan2(z, std::sqrt(x * x + y * y)) * RAD2DEG;
         double lon = std::atan2(y, x) * RAD2DEG;
-        double alt = alt1 + f * (alt2 - alt1); // linear altitude interpolation
+        double alt = alt1 + f * (alt2 - alt1);
 
         out.emplace_back(lon, lat, alt);
     }
@@ -163,17 +193,68 @@ class RightClickHandler : public vsg::Inherit<vsg::Visitor, RightClickHandler>
 public:
     rocky::Application* app = nullptr;
 
-    void apply(vsg::ButtonReleaseEvent& event) override
+    void apply(vsg::ButtonPressEvent& event) override
     {
         if (event.button != 3 || !app)
             return;
+
+        // Only capture press in Approach mode (need press point for hover location)
+        if (g_settings.mode.load() != 1)
+            return;
+
+        pressX_ = event.x;
+        pressY_ = event.y;
+        pressed_ = true;
 
         auto result = rocky::pointAtWindowCoords(
             vsg::ref_ptr<vsg::Viewer>(app->viewer.get()),
             event.x, event.y);
 
-        if (!result.ok())
+        if (result.ok())
+        {
+            auto wgs84 = result.value().point.transform(SRS::WGS84);
+            pressLon_ = wgs84.x;
+            pressLat_ = wgs84.y;
+            pressTerrainAlt_ = wgs84.z;
+            pressValid_ = true;
+        }
+        else
+        {
+            pressValid_ = false;
+        }
+    }
+
+    void apply(vsg::ButtonReleaseEvent& event) override
+    {
+        if (event.button != 3 || !app)
             return;
+
+        int mode = g_settings.mode.load();
+
+        if (mode == 0)
+        {
+            handleFlyTo(event);
+        }
+        else if (pressed_)
+        {
+            pressed_ = false;
+            handleApproach(event);
+        }
+    }
+
+private:
+    bool pressed_ = false;
+    int pressX_ = 0, pressY_ = 0;
+    double pressLon_ = 0, pressLat_ = 0, pressTerrainAlt_ = 0;
+    bool pressValid_ = false;
+
+    void handleFlyTo(vsg::ButtonReleaseEvent& event)
+    {
+        auto result = rocky::pointAtWindowCoords(
+            vsg::ref_ptr<vsg::Viewer>(app->viewer.get()),
+            event.x, event.y);
+
+        if (!result.ok()) return;
 
         auto wgs84 = result.value().point.transform(SRS::WGS84);
         double lon = wgs84.x, lat = wgs84.y, terrainAlt = wgs84.z;
@@ -182,28 +263,153 @@ public:
         double speed = g_settings.speedKnots.load();
         int idx = g_settings.nextIndex.fetch_add(1);
 
-        double markerAltMSL = isMSL ? flightAlt * 0.3048 : terrainAlt + flightAlt * 0.3048;
+        double markerAltMSL = isMSL ? flightAlt * FT_TO_M : terrainAlt + flightAlt * FT_TO_M;
+        double altFtMSL = markerAltMSL * M_TO_FT;
 
         entt::entity entity = entt::null;
         app->registry.write([&](entt::registry& r)
         {
             entity = r.create();
-
             auto& geom = r.emplace<PointGeometry>(entity);
             geom.srs = SRS::WGS84;
             geom.points.emplace_back(lon, lat, markerAltMSL);
-
             auto& style = r.emplace<PointStyle>(entity);
             style.color = Color(0.2f, 0.6f, 1.0f, 1.0f);
             style.width = 10.0f;
             style.antialias = 0.5f;
             style.depthOffset = 10000.0f;
-
             r.emplace<Point>(entity, geom, style);
             app->vsgcontext->requestFrame();
         });
 
-        g_wpQueue.push({ idx, lon, lat, terrainAlt, flightAlt, isMSL, speed, entity });
+        Waypoint wp{};
+        wp.index = idx;
+        wp.lon = lon; wp.lat = lat;
+        wp.terrainAlt = terrainAlt;
+        wp.flightAlt = flightAlt;
+        wp.isMSL = isMSL;
+        wp.speedKnots = speed;
+        wp.type = WPType::FlyTo;
+        wp.pointEntity = entity;
+
+        g_wpQueue.push(wp);
+        g_settings.prevAltFtMSL.store(altFtMSL);
+    }
+
+    void handleApproach(vsg::ButtonReleaseEvent& event)
+    {
+        if (!pressValid_) return;
+
+        // The hover point is where the user initially clicked (press location)
+        double hoverLon = pressLon_;
+        double hoverLat = pressLat_;
+        double hoverTerrainAlt = pressTerrainAlt_; // meters
+
+        // Hover altitude: 20 ft AGL
+        double hoverAltFtMSL = hoverTerrainAlt * M_TO_FT + 20.0;
+        double hoverAltM = hoverAltFtMSL * FT_TO_M;
+
+        // Determine inbound bearing from drag direction
+        // The drag goes FROM the click point toward the release point.
+        // The inbound bearing is the OPPOSITE direction (approaching FROM where you dragged TO).
+        double dx = event.x - pressX_;
+        double dy = event.y - pressY_;
+        double dragDist = std::sqrt(dx * dx + dy * dy);
+
+        double inboundBearing;
+        if (dragDist > 15.0) // enough drag to define bearing
+        {
+            // Pick earth point at release
+            auto releaseResult = rocky::pointAtWindowCoords(
+                vsg::ref_ptr<vsg::Viewer>(app->viewer.get()),
+                event.x, event.y);
+
+            if (releaseResult.ok())
+            {
+                auto releaseWgs84 = releaseResult.value().point.transform(SRS::WGS84);
+                // Bearing from hover point to drag end point
+                double dragBearing = bearingDeg(hoverLat, hoverLon,
+                                                releaseWgs84.y, releaseWgs84.x);
+                // Inbound bearing = approach FROM the direction the user dragged toward
+                inboundBearing = dragBearing;
+            }
+            else
+            {
+                // Fallback: use screen-space angle
+                double screenAngle = std::atan2(-dy, dx) * RAD2DEG; // Qt Y is inverted
+                inboundBearing = std::fmod(90.0 - screenAngle + 360.0, 360.0);
+            }
+        }
+        else
+        {
+            // No meaningful drag - default inbound from north
+            inboundBearing = 0.0;
+        }
+
+        // Compute FAF: 3-degree glideslope from previous altitude down to hover
+        double prevAltFtMSL = g_settings.prevAltFtMSL.load();
+        double altToLoseFt = prevAltFtMSL - hoverAltFtMSL;
+        if (altToLoseFt < 100.0) altToLoseFt = 100.0; // minimum descent
+
+        // distance = altitude / tan(3°)
+        double approachDistFt = altToLoseFt / std::tan(GLIDE_ANGLE_DEG * DEG2RAD);
+        double approachDistNm = approachDistFt / NM_TO_FT;
+
+        // FAF is located along the reciprocal of the inbound bearing
+        // (i.e., behind the hover point, in the direction the aircraft comes from)
+        double recipBearing = std::fmod(inboundBearing + 180.0, 360.0);
+        double fafLat, fafLon;
+        destPoint(hoverLat, hoverLon, recipBearing, approachDistNm, fafLat, fafLon);
+
+        double speed = g_settings.speedKnots.load();
+        int idx = g_settings.nextIndex.fetch_add(1);
+
+        // Create markers: FAF (yellow) and hover point (green)
+        entt::entity entity = entt::null;
+        app->registry.write([&](entt::registry& r)
+        {
+            // FAF marker
+            auto fafEntity = r.create();
+            auto& fafGeom = r.emplace<PointGeometry>(fafEntity);
+            fafGeom.srs = SRS::WGS84;
+            fafGeom.points.emplace_back(fafLon, fafLat, prevAltFtMSL * FT_TO_M);
+            auto& fafStyle = r.emplace<PointStyle>(fafEntity);
+            fafStyle.color = Color(1.0f, 0.8f, 0.0f, 1.0f); // yellow
+            fafStyle.width = 8.0f;
+            fafStyle.antialias = 0.5f;
+            fafStyle.depthOffset = 10000.0f;
+            r.emplace<Point>(fafEntity, fafGeom, fafStyle);
+
+            // Hover point marker
+            entity = r.create();
+            auto& geom = r.emplace<PointGeometry>(entity);
+            geom.srs = SRS::WGS84;
+            geom.points.emplace_back(hoverLon, hoverLat, hoverAltM);
+            auto& style = r.emplace<PointStyle>(entity);
+            style.color = Color(0.0f, 1.0f, 0.3f, 1.0f); // green
+            style.width = 14.0f;
+            style.antialias = 0.5f;
+            style.depthOffset = 10000.0f;
+            r.emplace<Point>(entity, geom, style);
+
+            app->vsgcontext->requestFrame();
+        });
+
+        Waypoint wp{};
+        wp.index = idx;
+        wp.lon = hoverLon; wp.lat = hoverLat;
+        wp.terrainAlt = hoverTerrainAlt;
+        wp.flightAlt = hoverAltFtMSL;
+        wp.isMSL = true; // hover alt is always computed as MSL
+        wp.speedKnots = speed;
+        wp.type = WPType::ApproachToHover;
+        wp.inboundBearing = inboundBearing;
+        wp.fafLon = fafLon; wp.fafLat = fafLat;
+        wp.fafAltFt = prevAltFtMSL;
+        wp.pointEntity = entity;
+
+        g_wpQueue.push(wp);
+        g_settings.prevAltFtMSL.store(hoverAltFtMSL);
     }
 };
 
@@ -222,11 +428,8 @@ public:
     }
 };
 
-// ── HUD overlay: flight settings + last waypoint ────────────────────
+// ── Floating settings panel ─────────────────────────────────────────
 
-// The settings panel is a small frameless floating window positioned
-// in the top-right of the earth pane. Only the panel itself captures
-// mouse events; everything else falls through to Rocky.
 class FlightSettingsPanel : public QWidget
 {
     Q_OBJECT
@@ -300,7 +503,17 @@ public:
         sep->setStyleSheet("QLabel { background: rgba(60, 140, 255, 60); }");
         sLayout->addWidget(sep);
 
-        sLayout->addWidget(new QLabel("ALTITUDE"));
+        // Mode selector
+        sLayout->addWidget(new QLabel("MODE"));
+        modeCombo_ = new QComboBox();
+        modeCombo_->addItems({"FLY TO", "APPROACH TO HOVER"});
+        sLayout->addWidget(modeCombo_);
+
+        sLayout->addSpacing(2);
+
+        // Altitude (for FlyTo mode)
+        altLabel_ = new QLabel("ALTITUDE");
+        sLayout->addWidget(altLabel_);
         altSpin_ = new QDoubleSpinBox();
         altSpin_->setRange(0, 60000);
         altSpin_->setValue(5000);
@@ -313,6 +526,14 @@ public:
         altTypeCombo_ = new QComboBox();
         altTypeCombo_->addItems({"MSL", "AGL"});
         sLayout->addWidget(altTypeCombo_);
+
+        // Approach info label (shown in approach mode)
+        approachInfo_ = new QLabel("Click + drag on earth\nDrag = inbound bearing\n3° GS to 20ft AGL");
+        approachInfo_->setStyleSheet(
+            "QLabel { color: #44cc88; font-size: 10px; padding: 4px; }");
+        approachInfo_->setWordWrap(true);
+        approachInfo_->setVisible(false);
+        sLayout->addWidget(approachInfo_);
 
         sLayout->addSpacing(4);
         sLayout->addWidget(new QLabel("SPEED"));
@@ -335,26 +556,39 @@ public:
             [](int i) { g_settings.isMSL.store(i == 0); });
         connect(speedSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             [](double v) { g_settings.speedKnots.store(v); });
+        connect(modeCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            [this](int i) {
+                g_settings.mode.store(i);
+                bool isFlyTo = (i == 0);
+                altLabel_->setVisible(isFlyTo);
+                altSpin_->setVisible(isFlyTo);
+                altTypeCombo_->setVisible(isFlyTo);
+                approachInfo_->setVisible(!isFlyTo);
+                adjustSize();
+            });
 
         adjustSize();
     }
 
     QPushButton* clearButton() { return clearBtn_; }
 
-    // Position in the top-right corner of the given global rect
     void positionOver(const QPoint& topRight)
     {
         move(topRight.x() - width() - 12, topRight.y() + 12);
     }
 
 private:
+    QComboBox* modeCombo_;
+    QLabel* altLabel_;
     QDoubleSpinBox* altSpin_;
     QComboBox* altTypeCombo_;
     QDoubleSpinBox* speedSpin_;
     QPushButton* clearBtn_;
+    QLabel* approachInfo_;
 };
 
-// Info labels shown as a separate small floating window in the top-left
+// ── Floating info overlay ───────────────────────────────────────────
+
 class FlightInfoOverlay : public QWidget
 {
     Q_OBJECT
@@ -381,7 +615,7 @@ public:
             "  border-radius: 3px;"
             "}";
 
-        instructionLabel_ = new QLabel("Right-click earth to add waypoints");
+        instructionLabel_ = new QLabel("Right-click to add waypoints");
         instructionLabel_->setStyleSheet(infoStyle);
         layout->addWidget(instructionLabel_);
 
@@ -404,15 +638,28 @@ public:
 
     void showWaypoint(const Waypoint& wp)
     {
-        lastWpLabel_->setText(QString("WP%1  %2%3 %4%5  %6ft %7  %8kts")
-            .arg(wp.index, 2, 10, QChar('0'))
-            .arg(QString::number(std::abs(wp.lat), 'f', 4))
-            .arg(wp.lat >= 0 ? "N" : "S")
-            .arg(QString::number(std::abs(wp.lon), 'f', 4))
-            .arg(wp.lon >= 0 ? "E" : "W")
-            .arg(QString::number(wp.flightAlt, 'f', 0))
-            .arg(wp.isMSL ? "MSL" : "AGL")
-            .arg(QString::number(wp.speedKnots, 'f', 0)));
+        if (wp.type == WPType::FlyTo)
+        {
+            lastWpLabel_->setText(QString("WP%1  %2%3 %4%5  %6ft %7  %8kts")
+                .arg(wp.index, 2, 10, QChar('0'))
+                .arg(QString::number(std::abs(wp.lat), 'f', 4))
+                .arg(wp.lat >= 0 ? "N" : "S")
+                .arg(QString::number(std::abs(wp.lon), 'f', 4))
+                .arg(wp.lon >= 0 ? "E" : "W")
+                .arg(QString::number(wp.flightAlt, 'f', 0))
+                .arg(wp.isMSL ? "MSL" : "AGL")
+                .arg(QString::number(wp.speedKnots, 'f', 0)));
+        }
+        else
+        {
+            lastWpLabel_->setText(QString("WP%1  APCH %2%3  IBD %4%5  20ft AGL  %6kts")
+                .arg(wp.index, 2, 10, QChar('0'))
+                .arg(QString::number(std::abs(wp.lat), 'f', 4))
+                .arg(wp.lat >= 0 ? "N" : "S")
+                .arg(QString::number(wp.inboundBearing, 'f', 0))
+                .arg(QString::fromUtf8("\xC2\xB0"))
+                .arg(QString::number(wp.speedKnots, 'f', 0)));
+        }
         lastWpLabel_->setVisible(true);
         adjustSize();
     }
@@ -462,13 +709,11 @@ protected:
         QWidget::resizeEvent(event);
         repositionOverlays();
     }
-
     void moveEvent(QMoveEvent* event) override
     {
         QWidget::moveEvent(event);
         repositionOverlays();
     }
-
     void showEvent(QShowEvent* event) override
     {
         QWidget::showEvent(event);
@@ -476,7 +721,6 @@ protected:
         if (settingsPanel_) settingsPanel_->show();
         if (infoOverlay_) infoOverlay_->show();
     }
-
     void hideEvent(QHideEvent* event) override
     {
         QWidget::hideEvent(event);
@@ -512,8 +756,8 @@ static QString formatFlightPlan(const std::vector<Waypoint>& wps)
         .arg(wps.size()).arg(wps.size() > 1 ? "s" : "");
     text += QString("").fill('=', 72) + "\n\n";
 
-    double totalDist = 0;
-    double totalTime = 0;
+    double totalDist = 0, totalTime = 0;
+    QString deg = QString::fromUtf8("\xC2\xB0");
 
     for (size_t i = 0; i < wps.size(); i++)
     {
@@ -521,33 +765,61 @@ static QString formatFlightPlan(const std::vector<Waypoint>& wps)
         auto latDir = wp.lat >= 0 ? "N" : "S";
         auto lonDir = wp.lon >= 0 ? "E" : "W";
 
-        text += QString("  WP%1  %2%3 %4  %5%6 %7\n")
-            .arg(wp.index, 2, 10, QChar('0'))
-            .arg(QString::number(std::abs(wp.lat), 'f', 5)).arg(latDir)
-            .arg(QString::fromUtf8("\xC2\xB0"))
-            .arg(QString::number(std::abs(wp.lon), 'f', 5)).arg(lonDir)
-            .arg(QString::fromUtf8("\xC2\xB0"));
+        if (wp.type == WPType::FlyTo)
+        {
+            text += QString("  WP%1  FLY TO  %2%3%4  %5%6%7\n")
+                .arg(wp.index, 2, 10, QChar('0'))
+                .arg(QString::number(std::abs(wp.lat), 'f', 5)).arg(latDir).arg(deg)
+                .arg(QString::number(std::abs(wp.lon), 'f', 5)).arg(lonDir).arg(deg);
+            text += QString("        ALT %1 ft %2   SPD %3 kts\n")
+                .arg(QString::number(wp.flightAlt, 'f', 0))
+                .arg(wp.isMSL ? "MSL" : "AGL")
+                .arg(QString::number(wp.speedKnots, 'f', 0));
+        }
+        else
+        {
+            text += QString("  WP%1  APPROACH TO HOVER  %2%3%4  %5%6%7\n")
+                .arg(wp.index, 2, 10, QChar('0'))
+                .arg(QString::number(std::abs(wp.lat), 'f', 5)).arg(latDir).arg(deg)
+                .arg(QString::number(std::abs(wp.lon), 'f', 5)).arg(lonDir).arg(deg);
+            text += QString("        HOVER 20 ft AGL (%1 ft MSL)   SPD %2 kts\n")
+                .arg(QString::number(wp.flightAlt, 'f', 0))
+                .arg(QString::number(wp.speedKnots, 'f', 0));
+            text += QString("        INBOUND %1%2   FAF %3 ft MSL   3%4 GS\n")
+                .arg(QString::number(wp.inboundBearing, 'f', 0)).arg(deg)
+                .arg(QString::number(wp.fafAltFt, 'f', 0)).arg(deg);
 
-        text += QString("        ALT %1 ft %2   SPD %3 kts\n")
-            .arg(QString::number(wp.flightAlt, 'f', 0))
-            .arg(wp.isMSL ? "MSL" : "AGL")
-            .arg(QString::number(wp.speedKnots, 'f', 0));
+            double approachDist = haversineNm(wp.fafLat, wp.fafLon, wp.lat, wp.lon);
+            text += QString("        APPROACH LEG %1 nm\n")
+                .arg(QString::number(approachDist, 'f', 1));
+        }
 
         if (i > 0)
         {
             auto& prev = wps[i - 1];
-            double dist = haversineNm(prev.lat, prev.lon, wp.lat, wp.lon);
-            double brg = bearingDeg(prev.lat, prev.lon, wp.lat, wp.lon);
+            double fromLat = prev.lat, fromLon = prev.lon;
+            double toLat = wp.lat, toLon = wp.lon;
+
+            // For approach waypoints, distance is to the FAF, then FAF to hover
+            if (wp.type == WPType::ApproachToHover)
+            {
+                toLat = wp.fafLat;
+                toLon = wp.fafLon;
+            }
+
+            double dist = haversineNm(fromLat, fromLon, toLat, toLon);
+            double brg = bearingDeg(fromLat, fromLon, toLat, toLon);
+            if (wp.type == WPType::ApproachToHover)
+                dist += haversineNm(wp.fafLat, wp.fafLon, wp.lat, wp.lon);
+
             double legTime = (wp.speedKnots > 0) ? dist / wp.speedKnots : 0;
             totalDist += dist;
             totalTime += legTime;
 
             int mins = static_cast<int>(legTime * 60.0 + 0.5);
-
             text += QString("        LEG  %1 nm  BRG %2%3  ETE %4 min\n")
                 .arg(QString::number(dist, 'f', 1))
-                .arg(QString::number(brg, 'f', 0))
-                .arg(QString::fromUtf8("\xC2\xB0"))
+                .arg(QString::number(brg, 'f', 0)).arg(deg)
                 .arg(mins);
         }
         text += "\n";
@@ -596,8 +868,6 @@ int main(int argc, char** argv)
     rightClickHandler->app = &app;
     app.viewer->getEventHandlers().push_back(rightClickHandler);
 
-    // ── Qt UI ───────────────────────────────────────────────────────
-
     QMainWindow mainWindow;
     mainWindow.setWindowTitle("Rocky Flight Planner");
     mainWindow.resize(1600, 900);
@@ -606,24 +876,20 @@ int main(int argc, char** argv)
     auto* fileMenu = menuBar->addMenu("&File");
     fileMenu->addAction("E&xit", &qtApp, &QApplication::quit);
     auto* viewMenu = menuBar->addMenu("&View");
-    mainWindow.statusBar()->showMessage("Right-click on the earth to add waypoints");
+    mainWindow.statusBar()->showMessage("Right-click to add waypoints | Approach mode: click+drag for bearing");
 
     ads::CDockManager::setConfigFlag(ads::CDockManager::OpaqueSplitterResize, true);
     ads::CDockManager::setConfigFlag(ads::CDockManager::FocusHighlighting, true);
     auto* dockManager = new ads::CDockManager(&mainWindow);
 
-    // ── Earth View (center) — dominant area ─────────────────────────
-
     auto* rockyContent = new RockyDockContent(app);
     auto* rockyDock = new ads::CDockWidget(dockManager, "Earth View");
     rockyDock->setWidget(rockyContent);
     rockyDock->setMinimumSizeHintMode(ads::CDockWidget::MinimumSizeHintFromContent);
-    auto* centerArea = dockManager->addDockWidget(ads::CenterDockWidgetArea, rockyDock);
-
-    // ── Waypoint Table (right, narrow) ──────────────────────────────
+    dockManager->addDockWidget(ads::CenterDockWidgetArea, rockyDock);
 
     auto* wpTree = new QTreeWidget();
-    wpTree->setHeaderLabels({"WP", "Lat", "Lon", "Alt", "Ref", "Kts"});
+    wpTree->setHeaderLabels({"WP", "Type", "Lat", "Lon", "Alt", "Spd"});
     wpTree->setAlternatingRowColors(true);
     wpTree->setRootIsDecorated(false);
     wpTree->header()->setStretchLastSection(true);
@@ -631,9 +897,7 @@ int main(int argc, char** argv)
 
     auto* wpDock = new ads::CDockWidget(dockManager, "Waypoints");
     wpDock->setWidget(wpTree);
-    auto* rightArea = dockManager->addDockWidget(ads::RightDockWidgetArea, wpDock);
-
-    // ── Flight Plan Text (bottom, shorter) ──────────────────────────
+    dockManager->addDockWidget(ads::RightDockWidgetArea, wpDock);
 
     auto* planText = new QTextEdit();
     planText->setReadOnly(true);
@@ -648,12 +912,10 @@ int main(int argc, char** argv)
     planDock->setWidget(planText);
     dockManager->addDockWidget(ads::BottomDockWidgetArea, planDock);
 
-    // Keep the right panel narrow so the earth view is dominant
     wpDock->setMinimumSizeHintMode(ads::CDockWidget::MinimumSizeHintFromContent);
     wpTree->setMinimumWidth(280);
-    wpTree->setMaximumWidth(400);
+    wpTree->setMaximumWidth(420);
 
-    // View menu toggles
     viewMenu->addAction(rockyDock->toggleViewAction());
     viewMenu->addAction(wpDock->toggleViewAction());
     viewMenu->addAction(planDock->toggleViewAction());
@@ -663,7 +925,13 @@ int main(int argc, char** argv)
     std::vector<Waypoint> waypoints;
     entt::entity routeLineEntity = entt::null;
 
-    // Build route line with great-circle interpolation
+    auto getWpAltMSL = [](const Waypoint& wp) -> double {
+        if (wp.type == WPType::ApproachToHover)
+            return wp.flightAlt * FT_TO_M; // already MSL
+        return wp.isMSL ? wp.flightAlt * FT_TO_M
+                        : wp.terrainAlt + wp.flightAlt * FT_TO_M;
+    };
+
     auto updateRouteLine = [&]()
     {
         app.registry.write([&](entt::registry& r)
@@ -675,33 +943,41 @@ int main(int argc, char** argv)
             if (waypoints.size() < 2) return;
 
             routeLineEntity = r.create();
-
             auto& geom = r.emplace<LineGeometry>(routeLineEntity);
             geom.topology = LineTopology::Strip;
             geom.srs = SRS::WGS84;
 
-            // First waypoint
-            auto& wp0 = waypoints[0];
-            double alt0 = wp0.isMSL ? wp0.flightAlt * 0.3048
-                                    : wp0.terrainAlt + wp0.flightAlt * 0.3048;
-            geom.points.emplace_back(wp0.lon, wp0.lat, alt0);
-
-            // Interpolate great-circle segments between consecutive waypoints
-            // Max 50nm per segment keeps arcs smooth on the globe
             constexpr double MAX_SEG_NM = 50.0;
+
+            auto& wp0 = waypoints[0];
+            geom.points.emplace_back(wp0.lon, wp0.lat, getWpAltMSL(wp0));
+
             for (size_t i = 1; i < waypoints.size(); i++)
             {
                 auto& prev = waypoints[i - 1];
                 auto& cur = waypoints[i];
-                double prevAlt = prev.isMSL ? prev.flightAlt * 0.3048
-                                            : prev.terrainAlt + prev.flightAlt * 0.3048;
-                double curAlt = cur.isMSL ? cur.flightAlt * 0.3048
-                                          : cur.terrainAlt + cur.flightAlt * 0.3048;
 
-                interpolateGreatCircle(
-                    prev.lat, prev.lon, prevAlt,
-                    cur.lat, cur.lon, curAlt,
-                    MAX_SEG_NM, geom.points);
+                double prevAlt = getWpAltMSL(prev);
+                double prevLat = prev.lat, prevLon = prev.lon;
+
+                if (cur.type == WPType::ApproachToHover)
+                {
+                    // Route to FAF first (great-circle at prev altitude)
+                    double fafAlt = cur.fafAltFt * FT_TO_M;
+                    interpolateGreatCircle(prevLat, prevLon, prevAlt,
+                        cur.fafLat, cur.fafLon, fafAlt, MAX_SEG_NM, geom.points);
+
+                    // Then glideslope from FAF down to hover point
+                    double hoverAlt = getWpAltMSL(cur);
+                    interpolateGreatCircle(cur.fafLat, cur.fafLon, fafAlt,
+                        cur.lat, cur.lon, hoverAlt, 5.0, geom.points);
+                }
+                else
+                {
+                    double curAlt = getWpAltMSL(cur);
+                    interpolateGreatCircle(prevLat, prevLon, prevAlt,
+                        cur.lat, cur.lon, curAlt, MAX_SEG_NM, geom.points);
+                }
             }
 
             auto& style = r.emplace<LineStyle>(routeLineEntity);
@@ -714,7 +990,6 @@ int main(int argc, char** argv)
         });
     };
 
-    // Clear flight plan
     QObject::connect(rockyContent->settingsPanel()->clearButton(), &QPushButton::clicked, [&]() {
         app.registry.write([&](entt::registry& r) {
             for (auto& wp : waypoints)
@@ -729,6 +1004,7 @@ int main(int argc, char** argv)
         wpTree->clear();
         planText->setPlainText("(empty flight plan)");
         g_settings.nextIndex.store(1);
+        g_settings.prevAltFtMSL.store(5000.0);
         mainWindow.statusBar()->showMessage("Flight plan cleared");
     });
 
@@ -749,15 +1025,22 @@ int main(int argc, char** argv)
             waypoints.push_back(wp);
             changed = true;
 
+            QString typeStr = (wp.type == WPType::FlyTo) ? "FLY" : "APCH";
             auto latDir = wp.lat >= 0 ? "N" : "S";
             auto lonDir = wp.lon >= 0 ? "E" : "W";
 
+            QString altStr;
+            if (wp.type == WPType::ApproachToHover)
+                altStr = QString("20 AGL");
+            else
+                altStr = QString("%1 %2").arg(QString::number(wp.flightAlt, 'f', 0)).arg(wp.isMSL ? "M" : "A");
+
             auto* item = new QTreeWidgetItem({
                 QString("WP%1").arg(wp.index, 2, 10, QChar('0')),
+                typeStr,
                 QString("%1%2").arg(QString::number(std::abs(wp.lat), 'f', 4)).arg(latDir),
                 QString("%1%2").arg(QString::number(std::abs(wp.lon), 'f', 4)).arg(lonDir),
-                QString::number(wp.flightAlt, 'f', 0),
-                wp.isMSL ? "MSL" : "AGL",
+                altStr,
                 QString::number(wp.speedKnots, 'f', 0)
             });
             wpTree->addTopLevelItem(item);
@@ -766,8 +1049,9 @@ int main(int argc, char** argv)
             rockyContent->infoOverlay()->showWaypoint(wp);
 
             mainWindow.statusBar()->showMessage(
-                QString("WP%1 added - %2 waypoints in plan")
+                QString("WP%1 added (%2) - %3 waypoints in plan")
                     .arg(wp.index, 2, 10, QChar('0'))
+                    .arg(typeStr)
                     .arg(waypoints.size()));
         }
 
