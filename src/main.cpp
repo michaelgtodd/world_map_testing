@@ -92,6 +92,7 @@ int main(int argc, char** argv)
     app.viewer->getEventHandlers().push_back(rightClickHandler);
 
     FlightPlan flightPlan(settings);
+    flightPlan.initRouteLine(app);
 
     QMainWindow mainWindow;
     mainWindow.setWindowTitle("Rocky Flight Planner");

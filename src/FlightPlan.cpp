@@ -24,9 +24,15 @@ void FlightPlan::clear(rocky::Application& app)
         for (auto& wp : waypoints_)
             if (wp.pointEntity != entt::null && r.valid(wp.pointEntity))
                 r.destroy(wp.pointEntity);
+
+        // Clear the line geometry but keep the entity alive
         if (routeLineEntity_ != entt::null && r.valid(routeLineEntity_))
-            r.destroy(routeLineEntity_);
-        routeLineEntity_ = entt::null;
+        {
+            auto& geom = r.get<LineGeometry>(routeLineEntity_);
+            geom.points.clear();
+            geom.dirty(r);
+        }
+
         app.vsgcontext->requestFrame();
     });
     waypoints_.clear();
@@ -36,59 +42,14 @@ void FlightPlan::clear(rocky::Application& app)
     emit planChanged();
 }
 
-double FlightPlan::getWpAltMSL(const Waypoint& wp) const
+void FlightPlan::initRouteLine(rocky::Application& app)
 {
-    if (wp.type == WPType::ApproachToHover)
-        return wp.flightAlt * geo::FT_TO_M; // already MSL
-    return wp.isMSL ? wp.flightAlt * geo::FT_TO_M
-                    : wp.terrainAlt + wp.flightAlt * geo::FT_TO_M;
-}
-
-void FlightPlan::updateRouteLine(rocky::Application& app)
-{
-    app.registry.write([&](entt::registry& r)
-    {
-        if (routeLineEntity_ != entt::null && r.valid(routeLineEntity_))
-            r.destroy(routeLineEntity_);
-        routeLineEntity_ = entt::null;
-
-        if (waypoints_.size() < 2) return;
-
+    app.registry.write([&](entt::registry& r) {
         routeLineEntity_ = r.create();
+
         auto& geom = r.emplace<LineGeometry>(routeLineEntity_);
         geom.topology = LineTopology::Strip;
         geom.srs = SRS::WGS84;
-
-        constexpr double MAX_SEG_NM = 50.0;
-
-        auto& wp0 = waypoints_[0];
-        geom.points.emplace_back(wp0.lon, wp0.lat, getWpAltMSL(wp0));
-
-        for (size_t i = 1; i < waypoints_.size(); i++)
-        {
-            auto& prev = waypoints_[i - 1];
-            auto& cur = waypoints_[i];
-
-            double prevAlt = getWpAltMSL(prev);
-            double prevLat = prev.lat, prevLon = prev.lon;
-
-            if (cur.type == WPType::ApproachToHover)
-            {
-                double fafAlt = cur.fafAltFt * geo::FT_TO_M;
-                geo::interpolateGreatCircle(prevLat, prevLon, prevAlt,
-                    cur.fafLat, cur.fafLon, fafAlt, MAX_SEG_NM, geom.points);
-
-                double hoverAlt = getWpAltMSL(cur);
-                geo::interpolateGreatCircle(cur.fafLat, cur.fafLon, fafAlt,
-                    cur.lat, cur.lon, hoverAlt, 5.0, geom.points);
-            }
-            else
-            {
-                double curAlt = getWpAltMSL(cur);
-                geo::interpolateGreatCircle(prevLat, prevLon, prevAlt,
-                    cur.lat, cur.lon, curAlt, MAX_SEG_NM, geom.points);
-            }
-        }
 
         auto& style = r.emplace<LineStyle>(routeLineEntity_);
         style.color = Color(0.2f, 0.8f, 1.0f, 0.9f);
@@ -96,8 +57,89 @@ void FlightPlan::updateRouteLine(rocky::Application& app)
         style.depthOffset = 100000.0f;
 
         r.emplace<Line>(routeLineEntity_, geom, style);
+    });
+}
+
+void FlightPlan::updateRouteLine(rocky::Application& app)
+{
+    if (routeLineEntity_ == entt::null) return;
+
+    app.registry.write([&](entt::registry& r)
+    {
+        if (!r.valid(routeLineEntity_)) return;
+
+        auto& geom = r.get<LineGeometry>(routeLineEntity_);
+        geom.points.clear();
+        geom.srs = SRS::WGS84;
+
+        if (waypoints_.size() < 2)
+        {
+            geom.dirty(r);
+            app.vsgcontext->requestFrame();
+            return;
+        }
+
+
+        constexpr double MAX_SEG_NM = 50.0;
+
+        for (size_t i = 0; i < waypoints_.size(); i++)
+        {
+            auto& cur = waypoints_[i];
+
+            if (cur.type == WPType::ApproachToHover && i > 0)
+            {
+                double fafAlt = cur.fafAltFt * geo::FT_TO_M;
+                auto& prev = waypoints_[i - 1];
+                double prevAlt = getWpAltMSL(prev);
+
+                geo::interpolateGreatCircle(prev.lat, prev.lon, prevAlt,
+                    cur.fafLat, cur.fafLon, fafAlt, MAX_SEG_NM, geom.points);
+
+                double hoverAlt = getWpAltMSL(cur);
+                geo::interpolateGreatCircle(cur.fafLat, cur.fafLon, fafAlt,
+                    cur.lat, cur.lon, hoverAlt, 5.0, geom.points);
+            }
+            else if (i > 0)
+            {
+                auto& prev = waypoints_[i - 1];
+                double prevAlt = getWpAltMSL(prev);
+                double curAlt = getWpAltMSL(cur);
+                double distNm = geo::haversineNm(prev.lat, prev.lon, cur.lat, cur.lon);
+
+                if (distNm > 5.0)
+                {
+                    geo::interpolateGreatCircle(prev.lat, prev.lon, prevAlt,
+                        cur.lat, cur.lon, curAlt, MAX_SEG_NM, geom.points);
+                }
+                else
+                {
+                    geom.points.emplace_back(cur.lon, cur.lat, curAlt);
+                }
+            }
+            else
+            {
+                geom.points.emplace_back(cur.lon, cur.lat, getWpAltMSL(cur));
+            }
+        }
+
+        geom.dirty(r);
         app.vsgcontext->requestFrame();
     });
+}
+
+double FlightPlan::getWpAltMSL(const Waypoint& wp) const
+{
+    double alt;
+    if (wp.type == WPType::ApproachToHover)
+        alt = wp.flightAlt * geo::FT_TO_M;
+    else if (wp.isMSL)
+        alt = wp.flightAlt * geo::FT_TO_M;
+    else
+        alt = wp.terrainAlt + wp.flightAlt * geo::FT_TO_M;
+
+    // Clamp to at least 1m above WGS84 ellipsoid to prevent underground lines
+    // when terrain data hasn't loaded yet (returns ~0 or ellipsoid height)
+    return std::max(alt, 1.0);
 }
 
 QString FlightPlan::formatText() const

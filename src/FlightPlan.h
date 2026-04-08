@@ -17,6 +17,7 @@ public:
 
     void addWaypoint(const Waypoint& wp);
     void clear(rocky::Application& app);
+    void initRouteLine(rocky::Application& app);
     void updateRouteLine(rocky::Application& app);
     QString formatText() const;
 
