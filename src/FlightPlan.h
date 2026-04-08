@@ -36,4 +36,5 @@ private:
     std::vector<Waypoint> waypoints_;
     entt::entity routeLineEntity_ = entt::null;
     FlightSettings& settings_;
+    rocky::Application* app_ = nullptr;
 };

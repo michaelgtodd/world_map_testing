@@ -81,7 +81,7 @@ private:
         style.color = color;
         style.width = width;
         style.antialias = 0.5f;
-        style.depthOffset = 10000.0f;
+        style.depthOffset = 0.0f;
         r.emplace<Point>(entity, geom, style);
         return entity;
     }
@@ -103,7 +103,6 @@ private:
 
         double markerAltMSL = isMSL ? flightAlt * geo::FT_TO_M : terrainAlt + flightAlt * geo::FT_TO_M;
         double altFtMSL = markerAltMSL * geo::M_TO_FT;
-
         entt::entity entity = entt::null;
         app->registry.write([&](entt::registry& r)
         {
