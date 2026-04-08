@@ -103,10 +103,7 @@ int main(int argc, char** argv)
     }
     if (manip)
     {
-        manip->settings.bindMouse(
-            MapManipulator::ACTION_ROTATE,
-            MapManipulator::MOUSE_LEFT_BUTTON,
-            vsg::MODKEY_Control);
+        earthPane->setManipulator(manip);
     }
 
     // Connect nav widget to manipulator

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QWidget>
+#include <rocky/vsg/MapManipulator.h>
+#include <vsg/core/ref_ptr.h>
 
 #include "FlightSettingsPanel.h"
 #include "FlightInfoOverlay.h"
@@ -19,6 +21,7 @@ public:
     FlightInfoOverlay* infoOverlay() { return infoOverlay_; }
     NavWidget* navWidget() { return navWidget_; }
 
+    void setManipulator(vsg::ref_ptr<rocky::MapManipulator> manip) { manip_ = manip; }
     void installAncestorFilters();
 
 protected:
@@ -36,4 +39,9 @@ private:
     FlightSettingsPanel* settingsPanel_ = nullptr;
     FlightInfoOverlay* infoOverlay_ = nullptr;
     NavWidget* navWidget_ = nullptr;
+    vsg::ref_ptr<rocky::MapManipulator> manip_;
+
+    // Ctrl+drag rotation state
+    bool ctrlDragging_ = false;
+    int lastDragX_ = 0, lastDragY_ = 0;
 };

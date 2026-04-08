@@ -1,9 +1,11 @@
 #include "EarthViewPane.h"
 
+#include <QApplication>
 #include <QVBoxLayout>
 #include <QEvent>
 #include <QResizeEvent>
 #include <QMoveEvent>
+#include <QMouseEvent>
 #include <QShowEvent>
 #include <QHideEvent>
 
@@ -34,6 +36,11 @@ EarthViewPane::EarthViewPane(rocky::Application& app, FlightSettings& settings, 
     settingsPanel_->show();
     infoOverlay_->show();
     navWidget_->show();
+
+    // App-level event filter to catch Ctrl+drag for camera rotation.
+    // The native Vulkan window container doesn't forward events to
+    // widget-level filters, so we must intercept at the QApplication level.
+    qApp->installEventFilter(this);
 }
 
 void EarthViewPane::installAncestorFilters()
@@ -49,11 +56,49 @@ void EarthViewPane::installAncestorFilters()
 bool EarthViewPane::eventFilter(QObject* obj, QEvent* event)
 {
     auto type = event->type();
+
+    // Reposition overlays on ancestor move/resize
     if (type == QEvent::Move || type == QEvent::Resize ||
         type == QEvent::WindowStateChange || type == QEvent::LayoutRequest)
     {
         repositionOverlays();
     }
+
+    // Ctrl+Left-drag → rotate camera
+    if (manip_)
+    {
+        if (type == QEvent::MouseButtonPress)
+        {
+            auto* me = static_cast<QMouseEvent*>(event);
+            if (me->button() == Qt::LeftButton && (me->modifiers() & Qt::ControlModifier))
+            {
+                ctrlDragging_ = true;
+                lastDragX_ = me->globalPosition().x();
+                lastDragY_ = me->globalPosition().y();
+                return true;
+            }
+        }
+        else if (type == QEvent::MouseMove && ctrlDragging_)
+        {
+            auto* me = static_cast<QMouseEvent*>(event);
+            int gx = me->globalPosition().x();
+            int gy = me->globalPosition().y();
+            double dx = (gx - lastDragX_) * 0.003;
+            double dy = (gy - lastDragY_) * 0.003;
+            lastDragX_ = gx;
+            lastDragY_ = gy;
+
+            manip_->rotate(dx, dy);
+            app_.vsgcontext->requestFrame();
+            return true;
+        }
+        else if (type == QEvent::MouseButtonRelease && ctrlDragging_)
+        {
+            ctrlDragging_ = false;
+            return true;
+        }
+    }
+
     return QWidget::eventFilter(obj, event);
 }
 
