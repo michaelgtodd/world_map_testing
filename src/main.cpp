@@ -62,6 +62,20 @@ int main(int argc, char** argv)
         app.mapNode->map->add(img);
     }
 
+    // Terrain quality
+    app.mapNode->terrainSettings().lighting = true;
+    app.mapNode->terrainSettings().skirtRatio = 0.025f;
+    app.mapNode->terrainSettings().concurrency = 8;
+
+    // Sky and atmosphere
+    if (app.skyNode)
+    {
+        app.skyNode->setShowAtmosphere(true);
+        app.skyNode->setDateTime(rocky::DateTime(2026, 6, 21, 16.0)); // summer afternoon
+        if (app.skyNode->ambient)
+            app.skyNode->ambient->color.set(0.06f, 0.06f, 0.08f);
+    }
+
     // Stack-allocated shared state
     FlightSettings settings;
     WaypointQueue wpQueue;
