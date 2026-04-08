@@ -53,12 +53,18 @@ int main(int argc, char** argv)
 
     if (app.mapNode->map->layers().empty())
     {
+        // ReadyMap elevation (proper TMS endpoint)
         auto elev = rocky::TMSElevationLayer::create();
         elev->uri = "https://readymap.org/readymap/tiles/1.0.0/116/";
         app.mapNode->map->add(elev);
 
+        // ArcGIS World Imagery - set profile to bypass TMS manifest discovery
+        // and treat as an XYZ tile server
         auto img = rocky::TMSImageLayer::create();
-        img->uri = "https://readymap.org/readymap/tiles/1.0.0/7";
+        img->uri = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
+        img->format = "image/jpeg";
+        img->profile = rocky::Profile("spherical-mercator");
+        img->invertY = false; // ArcGIS uses standard web tile Y ordering
         app.mapNode->map->add(img);
     }
 
