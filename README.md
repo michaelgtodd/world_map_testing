@@ -2,27 +2,28 @@
 
 [![CI](https://github.com/michaelgtodd/world_map_testing/actions/workflows/ci.yml/badge.svg)](https://github.com/michaelgtodd/world_map_testing/actions/workflows/ci.yml)
 
-A C++ flight planning application built on [Rocky](https://github.com/pelicanmapping/rocky) (Vulkan earth renderer), Qt6, and the [Qt Advanced Docking System](https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System). Place waypoints on a 3D globe, configure altitude and speed, and generate textual flight plans with great-circle route visualization.
+A C++ flight planning application built on [Rocky](https://github.com/pelicanmapping/rocky) (Vulkan earth renderer), Qt6, and the [Qt Advanced Docking System](https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System). Place waypoints on a 3D globe with ArcGIS World Imagery and MapZen Terrarium elevation, configure altitude and speed, and generate textual flight plans with great-circle route visualization.
 
 ![Rocky Flight Planner](docs/images/screenshot.png)
 
 ## Features
 
-- **3D Earth View** -- Rocky/Vulkan globe with TMS imagery and elevation, embedded in a Qt docking pane
-- **Flight Planning** -- Right-click to place FlyTo waypoints with configurable altitude (MSL/AGL) and speed (knots)
+- **3D Earth View** -- Rocky/Vulkan globe with ArcGIS World Imagery and MapZen Terrarium elevation, embedded in a Qt docking pane
+- **Flight Planning** -- Right-click to place FlyTo waypoints with configurable altitude (MSL/AGL, default 50ft AGL) and speed (knots)
 - **Approach to Hover** -- Click-and-drag to define an approach with inbound bearing, automatic 3-degree glideslope from cruise altitude to 20 ft AGL
 - **Great-Circle Routes** -- Route lines follow earth curvature via spherical interpolation
 - **Flight Plan Display** -- Formatted text output with leg distances, bearings, and estimated time enroute
 - **Floating HUD Overlays** -- Flight settings panel, info overlay, and navigation widget float over the earth view
 - **Dockable Panels** -- Waypoint table and flight plan text in rearrangeable dock panes
 - **Camera Controls** -- Ctrl+Left-drag to rotate/tilt, navigation widget with zoom/rotate/home buttons
+- **Externalized Map Config** -- Layer sources and terrain settings in `data/default.map.json`
 
 ## Dependencies
 
 - **Qt6** (Core, Gui, Widgets)
-- **Qt Advanced Docking System** (built from source)
-- **Rocky** 1.0.2 (built from source with vcpkg)
-- **vsgQt** (built from source)
+- **Qt Advanced Docking System** 4.5.0 (built from source)
+- **Rocky** v1.0.0 (built from source with vcpkg, ImGui enabled)
+- **vsgQt** v0.4.0 (built from source)
 - **VulkanSceneGraph** (via vcpkg, pulled by Rocky)
 - **Google Test** (for unit tests)
 
@@ -47,7 +48,7 @@ sudo apt-get install -y \
 
 ### Quick Start (with prebuilt dependencies)
 
-If Rocky, vsgQt, and Qt Advanced Docking System are already installed to `/opt/local` (or similar):
+If Rocky, vsgQt, and Qt Advanced Docking System are already installed:
 
 ```bash
 cmake --preset default
@@ -84,7 +85,7 @@ The run script sets `ROCKY_FILE_PATH` (for shaders/resources) and `QT_QPA_PLATFO
 ## Testing
 
 ```bash
-scripts/test.sh                    # run all tests
+scripts/test.sh                    # run all 21 tests
 scripts/test.sh -R Geodesy         # run only geodesy tests
 ctest --preset default             # via CMake preset
 ```
@@ -116,9 +117,11 @@ src/
     FlightSettingsPanel.h       Settings overlay (altitude, speed, mode)
     FlightInfoOverlay.h         Last-waypoint info display
     NavWidget.h                 Zoom/rotate/home navigation buttons
+data/
+  default.map.json              Map layer and terrain configuration
 tests/
-  test_geodesy.cpp              Geodesy function tests (21 tests)
-  test_waypoint.cpp             FlightSettings tests
+  test_geodesy.cpp              Geodesy function tests (18 tests)
+  test_waypoint.cpp             FlightSettings tests (3 tests)
 scripts/
   run.sh                        Run the application
   test.sh                       Run unit tests

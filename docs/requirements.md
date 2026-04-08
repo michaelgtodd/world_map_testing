@@ -4,9 +4,10 @@
 
 ### Earth Rendering
 - [x] Display a Rocky (Vulkan) earth scene in a Qt6 application
-- [x] TMS imagery layer (readymap.org satellite tiles)
-- [x] TMS elevation layer (terrain height data)
+- [x] ArcGIS World Imagery satellite tiles
+- [x] MapZen Terrarium elevation data (zoom 0-15)
 - [x] Earth view embedded in a Qt Advanced Docking System pane
+- [x] Externalized map configuration (`data/default.map.json`)
 
 ### Qt Widget Overlays on Earth View
 - [x] Render Qt widgets on top of the Vulkan earth view
@@ -17,8 +18,8 @@
 
 ### Flight Planning -- FlyTo Waypoints
 - [x] Right-click on the earth to place waypoints
-- [x] Configurable altitude in feet (0--60,000 ft range)
-- [x] Altitude reference: MSL (Mean Sea Level) or AGL (Above Ground Level)
+- [x] Configurable altitude in feet (0--60,000 ft range, default 50 ft)
+- [x] Altitude reference: MSL or AGL (default AGL)
 - [x] Configurable speed in knots (10--2,000 kts range)
 - [x] Waypoint markers rendered on the globe (blue dots)
 - [x] Route lines connecting waypoints
@@ -37,7 +38,7 @@
 - [x] Great-circle route lines that follow earth curvature (spherical interpolation)
 - [x] Maximum 50 nm per interpolated segment for smooth arcs
 - [x] Approach legs use 5 nm segments for smooth glideslope visualization
-- [x] Lines render with depth offset to stay visible above terrain
+- [x] Line geometry updated in-place via recycle()+dirty() pattern
 
 ### Flight Plan Text Display
 - [x] Formatted textual flight plan in a dockable pane
@@ -48,10 +49,11 @@
 
 ### Camera Controls
 - [x] Left-drag to pan
-- [x] Ctrl+Left-drag to rotate/tilt camera
+- [x] Ctrl+Left-drag to rotate/tilt camera (via QApplication event filter)
 - [x] Scroll wheel to zoom
 - [x] Navigation widget buttons for zoom in/out, rotate left/right, tilt up/down, home
 - [x] Nav widget zoom uses screen center (not mouse position)
+- [x] Initial camera at Sikorsky Stratford (41.25303N, 73.09147W, 2500ft)
 
 ### Docking System
 - [x] Earth view as center dock (dominant area)
@@ -63,14 +65,17 @@
 ### Build and Test
 - [x] CMake build system with presets
 - [x] RPATH baked into binary (no LD_LIBRARY_PATH needed)
-- [x] Google Test unit tests (21 tests)
-- [x] Test runner script (`test.sh`)
+- [x] Google Test unit tests (21 tests: 18 geodesy, 3 flight settings)
+- [x] Test runner script (`scripts/test.sh`)
 - [x] Docker-based clean build test (Ubuntu 24.04 from scratch)
-- [x] Run script (`run.sh`) with required environment variables
+- [x] Run script (`scripts/run.sh`) with required environment variables
+- [x] Pinned dependency versions (vcpkg 2026.03.18, ADS 4.5.0, Rocky v1.0.0, vsgQt v0.4.0)
 
 ## Non-Functional Requirements
 
 - Application must handle the Vulkan/Qt platform mismatch (vsgQt uses XCB surfaces, system may default to Wayland)
-- Rocky must be built without ImGui support (patches required for compilation)
+- Rocky built with ImGui enabled (the default) to avoid source patches
 - Floating overlay widgets must not block mouse events from reaching the Vulkan earth view
 - Flight settings changes must be thread-safe (atomic variables shared between Qt and VSG threads)
+- depthOffset set to 0 for accurate rendering at low altitudes (large values displace geometry toward camera)
+- When terrain tiles haven't loaded, altitude clamped to minimum 1m above WGS84 ellipsoid
