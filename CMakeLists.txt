@@ -17,7 +17,14 @@ find_package(vsg CONFIG REQUIRED)
 find_package(glslang CONFIG REQUIRED)
 find_package(vsgQt CONFIG REQUIRED)
 
-add_executable(${PROJECT_NAME} main.cpp)
+add_executable(${PROJECT_NAME}
+    main.cpp
+    FlightPlan.cpp
+    widgets/EarthViewPane.cpp
+    widgets/FlightSettingsPanel.h
+    widgets/FlightInfoOverlay.h
+    widgets/NavWidget.h
+)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Core
