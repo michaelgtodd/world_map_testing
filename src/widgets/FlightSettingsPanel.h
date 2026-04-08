@@ -95,15 +95,16 @@ public:
         sLayout->addWidget(altLabel_);
         altSpin_ = new QDoubleSpinBox();
         altSpin_->setRange(0, 60000);
-        altSpin_->setValue(5000);
+        altSpin_->setValue(50);
         altSpin_->setSuffix(" ft");
         altSpin_->setDecimals(0);
-        altSpin_->setSingleStep(500);
+        altSpin_->setSingleStep(10);
         altSpin_->setButtonSymbols(QDoubleSpinBox::PlusMinus);
         sLayout->addWidget(altSpin_);
 
         altTypeCombo_ = new QComboBox();
         altTypeCombo_->addItems({"MSL", "AGL"});
+        altTypeCombo_->setCurrentIndex(1); // default AGL
         sLayout->addWidget(altTypeCombo_);
 
         // Approach info label (shown in approach mode)

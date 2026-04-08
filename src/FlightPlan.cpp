@@ -31,7 +31,7 @@ void FlightPlan::clear(rocky::Application& app)
     });
     waypoints_.clear();
     settings_.nextIndex.store(1);
-    settings_.prevAltFtMSL.store(5000.0);
+    settings_.prevAltFtMSL.store(50.0);
     emit planCleared();
     emit planChanged();
 }

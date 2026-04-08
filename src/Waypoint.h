@@ -48,11 +48,11 @@ private:
 
 struct FlightSettings
 {
-    std::atomic<double> altitude{5000.0};
-    std::atomic<bool> isMSL{true};
+    std::atomic<double> altitude{50.0};
+    std::atomic<bool> isMSL{false};
     std::atomic<double> speedKnots{250.0};
     std::atomic<int> nextIndex{1};
     std::atomic<int> mode{0}; // 0=FlyTo, 1=ApproachToHover
     // Previous waypoint altitude in feet MSL (for glideslope calc)
-    std::atomic<double> prevAltFtMSL{5000.0};
+    std::atomic<double> prevAltFtMSL{50.0};
 };
