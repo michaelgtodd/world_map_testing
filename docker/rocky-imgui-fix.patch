@@ -1,9 +1,9 @@
 diff --git a/src/rocky/vsg/Application.h b/src/rocky/vsg/Application.h
-index 5bda00d2..3b4dd766 100644
+index aef5994e..c611c3c1 100644
 --- a/src/rocky/vsg/Application.h
 +++ b/src/rocky/vsg/Application.h
 @@ -19,7 +19,11 @@
-
+ 
  namespace ROCKY_NAMESPACE
  {
 +#ifdef ROCKY_HAS_IMGUI
@@ -11,17 +11,17 @@ index 5bda00d2..3b4dd766 100644
 +#else
 +    using RenderImGuiContext = vsg::Node;
 +#endif
-
+ 
      class ROCKY_EXPORT Application
      {
 diff --git a/src/rocky/vsg/ecs/ECSNode.cpp b/src/rocky/vsg/ecs/ECSNode.cpp
-index d15d8c1d..a6c22833 100644
+index f6f3cda8..29acf522 100644
 --- a/src/rocky/vsg/ecs/ECSNode.cpp
 +++ b/src/rocky/vsg/ecs/ECSNode.cpp
-@@ -115,8 +115,8 @@ ECSNode::ECSNode(Registry& reg, bool addDefaultSystems) :
-         add(MeshSystemNode::create(registry));
+@@ -91,8 +91,8 @@ ECSNode::ECSNode(Registry& reg, bool addDefaultSystems) :
          add(LineSystemNode::create(registry));
          add(PointSystemNode::create(registry));
+         //add(IconSystemNode::create(registry));
 -        add(LabelSystem::create(registry));
  #ifdef ROCKY_HAS_IMGUI
 +        add(LabelSystem::create(registry));
@@ -29,7 +29,7 @@ index d15d8c1d..a6c22833 100644
  #endif
      }
 diff --git a/src/rocky/vsg/ecs/LabelSystem.cpp b/src/rocky/vsg/ecs/LabelSystem.cpp
-index 2c1d4035..2c40ab1e 100644
+index 9c2d4477..d94214f5 100644
 --- a/src/rocky/vsg/ecs/LabelSystem.cpp
 +++ b/src/rocky/vsg/ecs/LabelSystem.cpp
 @@ -5,6 +5,7 @@
@@ -37,7 +37,7 @@ index 2c1d4035..2c40ab1e 100644
   */
  #include "LabelSystem.h"
 +#ifdef ROCKY_HAS_IMGUI
-
+ 
  #if IMGUI_VERSION_NUM >= 19200 && defined(_WIN32)
  #define USE_DYNAMIC_FONTS
 @@ -192,3 +193,5 @@ LabelSystem::on_destroy_LabelStyle(entt::registry& r, entt::entity e)

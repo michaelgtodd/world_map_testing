@@ -2,6 +2,13 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# ── Pinned dependency versions ───────────────────────────────────────
+
+ARG VCPKG_TAG=2026.03.18
+ARG ADS_TAG=4.5.0
+ARG ROCKY_TAG=v1.0.0
+ARG VSGQT_TAG=v0.4.0
+
 # ── System packages ──────────────────────────────────────────────────
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -36,14 +43,14 @@ WORKDIR /opt
 
 # ── vcpkg ────────────────────────────────────────────────────────────
 
-RUN git clone --depth 1 https://github.com/microsoft/vcpkg.git \
+RUN git clone --branch $VCPKG_TAG --depth 1 https://github.com/microsoft/vcpkg.git \
     && cd vcpkg && ./bootstrap-vcpkg.sh -disableMetrics
 
 ENV VCPKG_DIR=/opt/vcpkg
 
 # ── Qt Advanced Docking System ───────────────────────────────────────
 
-RUN git clone https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System.git \
+RUN git clone --branch $ADS_TAG https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System.git \
     && cd Qt-Advanced-Docking-System \
     && cmake -B build -G Ninja \
         -DCMAKE_INSTALL_PREFIX=/opt/local \
@@ -58,8 +65,7 @@ RUN git clone https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System.git
 COPY docker/rocky-imgui-fix.patch /opt/rocky-imgui-fix.patch
 
 # Build Rocky without Qt demo (vsgQt not available yet)
-RUN TRIPLET=$(cat /tmp/vcpkg-triplet) && \
-    git clone --depth 1 https://github.com/pelicanmapping/rocky.git \
+RUN git clone --branch $ROCKY_TAG --depth 1 https://github.com/pelicanmapping/rocky.git \
     && cd rocky \
     && git apply /opt/rocky-imgui-fix.patch \
     && cmake -B build -G Ninja \
@@ -75,7 +81,7 @@ RUN TRIPLET=$(cat /tmp/vcpkg-triplet) && \
 # ── vsgQt ────────────────────────────────────────────────────────────
 
 RUN TRIPLET=$(cat /tmp/vcpkg-triplet) && \
-    cd /opt && git clone --depth 1 https://github.com/vsg-dev/vsgQt.git \
+    cd /opt && git clone --branch $VSGQT_TAG --depth 1 https://github.com/vsg-dev/vsgQt.git \
     && cd vsgQt \
     && cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
