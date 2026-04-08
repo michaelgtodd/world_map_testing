@@ -22,6 +22,7 @@ EarthViewPane::EarthViewPane(rocky::Application& app, FlightSettings& settings, 
 
     auto* rockyWindow = new vsgQt::Window();
     rockyWidget_ = QWidget::createWindowContainer(rockyWindow);
+    rockyWidget_->setFocusPolicy(Qt::StrongFocus);
     layout->addWidget(rockyWidget_);
 
     rockyWindow->initializeWindow();
