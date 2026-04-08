@@ -27,6 +27,8 @@
 #include <QMenuBar>
 #include <QTimer>
 #include <QHeaderView>
+#include <QMoveEvent>
+#include <QShowEvent>
 
 #include <DockManager.h>
 #include <DockWidget.h>
@@ -222,63 +224,22 @@ public:
 
 // ── HUD overlay: flight settings + last waypoint ────────────────────
 
-class FlightHUD : public QWidget
+// The settings panel is a small frameless floating window positioned
+// in the top-right of the earth pane. Only the panel itself captures
+// mouse events; everything else falls through to Rocky.
+class FlightSettingsPanel : public QWidget
 {
     Q_OBJECT
 public:
-    explicit FlightHUD(QWidget* parent = nullptr) : QWidget(parent)
+    explicit FlightSettingsPanel(QWidget* parent = nullptr)
+        : QWidget(parent, Qt::FramelessWindowHint | Qt::Tool)
     {
         setAttribute(Qt::WA_TranslucentBackground, true);
-        setStyleSheet("background: transparent;");
+        setAttribute(Qt::WA_ShowWithoutActivating, true);
+        setFixedWidth(240);
 
-        auto* outerLayout = new QVBoxLayout(this);
-        outerLayout->setContentsMargins(0, 0, 0, 0);
-
-        // ── Top-left: instructions + last WP ────────────────────────
-        auto* topRow = new QHBoxLayout();
-        topRow->setAlignment(Qt::AlignTop | Qt::AlignLeft);
-
-        auto* infoCol = new QVBoxLayout();
-        infoCol->setContentsMargins(12, 12, 12, 0);
-        infoCol->setSpacing(6);
-
-        QString infoStyle =
-            "QLabel {"
-            "  background-color: rgba(0, 0, 0, 180);"
-            "  color: #00ff88;"
-            "  font-family: 'Consolas', 'Menlo', monospace;"
-            "  font-size: 12px;"
-            "  padding: 5px 8px;"
-            "  border-radius: 3px;"
-            "}";
-
-        instructionLabel_ = new QLabel("Right-click earth to add waypoints");
-        instructionLabel_->setStyleSheet(infoStyle);
-        infoCol->addWidget(instructionLabel_);
-
-        lastWpLabel_ = new QLabel("");
-        lastWpLabel_->setStyleSheet(
-            "QLabel {"
-            "  background-color: rgba(0, 0, 0, 180);"
-            "  color: #ffcc00;"
-            "  font-family: 'Consolas', 'Menlo', monospace;"
-            "  font-size: 12px;"
-            "  padding: 5px 8px;"
-            "  border-radius: 3px;"
-            "  border: 1px solid rgba(255, 204, 0, 80);"
-            "}");
-        lastWpLabel_->setVisible(false);
-        infoCol->addWidget(lastWpLabel_);
-        infoCol->addStretch();
-
-        topRow->addLayout(infoCol);
-        topRow->addStretch();
-
-        // ── Top-right: flight settings panel ────────────────────────
-        auto* settingsPanel = new QWidget();
-        settingsPanel->setFixedWidth(240);
-        settingsPanel->setStyleSheet(
-            "QWidget#settingsPanel {"
+        setStyleSheet(
+            "QWidget#panel {"
             "  background-color: rgba(10, 15, 30, 210);"
             "  border: 1px solid rgba(60, 140, 255, 120);"
             "  border-radius: 6px;"
@@ -316,26 +277,30 @@ public:
             "QPushButton:hover {"
             "  background-color: rgba(100, 40, 40, 220);"
             "}");
-        settingsPanel->setObjectName("settingsPanel");
 
-        auto* sLayout = new QVBoxLayout(settingsPanel);
+        auto* panel = new QWidget(this);
+        panel->setObjectName("panel");
+        auto* outer = new QVBoxLayout(this);
+        outer->setContentsMargins(0, 0, 0, 0);
+        outer->addWidget(panel);
+
+        auto* sLayout = new QVBoxLayout(panel);
         sLayout->setContentsMargins(10, 8, 10, 8);
         sLayout->setSpacing(4);
 
         auto* titleLabel = new QLabel("FLIGHT SETTINGS");
         titleLabel->setStyleSheet(
             "QLabel { color: #4488cc; font-weight: bold; font-size: 11px;"
-            "  letter-spacing: 2px; background: transparent; }");
+            "  letter-spacing: 2px; }");
         titleLabel->setAlignment(Qt::AlignCenter);
         sLayout->addWidget(titleLabel);
 
-        auto* sep1 = new QLabel("");
-        sep1->setFixedHeight(1);
-        sep1->setStyleSheet("QLabel { background: rgba(60, 140, 255, 60); }");
-        sLayout->addWidget(sep1);
+        auto* sep = new QLabel("");
+        sep->setFixedHeight(1);
+        sep->setStyleSheet("QLabel { background: rgba(60, 140, 255, 60); }");
+        sLayout->addWidget(sep);
 
-        auto* altLabel = new QLabel("ALTITUDE");
-        sLayout->addWidget(altLabel);
+        sLayout->addWidget(new QLabel("ALTITUDE"));
         altSpin_ = new QDoubleSpinBox();
         altSpin_->setRange(0, 60000);
         altSpin_->setValue(5000);
@@ -350,9 +315,7 @@ public:
         sLayout->addWidget(altTypeCombo_);
 
         sLayout->addSpacing(4);
-
-        auto* spdLabel = new QLabel("SPEED");
-        sLayout->addWidget(spdLabel);
+        sLayout->addWidget(new QLabel("SPEED"));
         speedSpin_ = new QDoubleSpinBox();
         speedSpin_->setRange(10, 2000);
         speedSpin_->setValue(250);
@@ -363,26 +326,80 @@ public:
         sLayout->addWidget(speedSpin_);
 
         sLayout->addSpacing(6);
-
         clearBtn_ = new QPushButton("CLEAR PLAN");
         sLayout->addWidget(clearBtn_);
 
-        auto* settingsContainer = new QVBoxLayout();
-        settingsContainer->setContentsMargins(0, 12, 12, 0);
-        settingsContainer->addWidget(settingsPanel);
-        settingsContainer->addStretch();
-
-        topRow->addLayout(settingsContainer);
-        outerLayout->addLayout(topRow);
-        outerLayout->addStretch();
-
-        // Connect spinboxes to global settings
         connect(altSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             [](double v) { g_settings.altitude.store(v); });
         connect(altTypeCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
             [](int i) { g_settings.isMSL.store(i == 0); });
         connect(speedSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             [](double v) { g_settings.speedKnots.store(v); });
+
+        adjustSize();
+    }
+
+    QPushButton* clearButton() { return clearBtn_; }
+
+    // Position in the top-right corner of the given global rect
+    void positionOver(const QPoint& topRight)
+    {
+        move(topRight.x() - width() - 12, topRight.y() + 12);
+    }
+
+private:
+    QDoubleSpinBox* altSpin_;
+    QComboBox* altTypeCombo_;
+    QDoubleSpinBox* speedSpin_;
+    QPushButton* clearBtn_;
+};
+
+// Info labels shown as a separate small floating window in the top-left
+class FlightInfoOverlay : public QWidget
+{
+    Q_OBJECT
+public:
+    explicit FlightInfoOverlay(QWidget* parent = nullptr)
+        : QWidget(parent, Qt::FramelessWindowHint | Qt::Tool)
+    {
+        setAttribute(Qt::WA_TranslucentBackground, true);
+        setAttribute(Qt::WA_ShowWithoutActivating, true);
+        setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        setStyleSheet("background: transparent;");
+
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(6);
+
+        QString infoStyle =
+            "QLabel {"
+            "  background-color: rgba(0, 0, 0, 180);"
+            "  color: #00ff88;"
+            "  font-family: 'Consolas', 'Menlo', monospace;"
+            "  font-size: 12px;"
+            "  padding: 5px 8px;"
+            "  border-radius: 3px;"
+            "}";
+
+        instructionLabel_ = new QLabel("Right-click earth to add waypoints");
+        instructionLabel_->setStyleSheet(infoStyle);
+        layout->addWidget(instructionLabel_);
+
+        lastWpLabel_ = new QLabel("");
+        lastWpLabel_->setStyleSheet(
+            "QLabel {"
+            "  background-color: rgba(0, 0, 0, 180);"
+            "  color: #ffcc00;"
+            "  font-family: 'Consolas', 'Menlo', monospace;"
+            "  font-size: 12px;"
+            "  padding: 5px 8px;"
+            "  border-radius: 3px;"
+            "  border: 1px solid rgba(255, 204, 0, 80);"
+            "}");
+        lastWpLabel_->setVisible(false);
+        layout->addWidget(lastWpLabel_);
+
+        adjustSize();
     }
 
     void showWaypoint(const Waypoint& wp)
@@ -397,43 +414,17 @@ public:
             .arg(wp.isMSL ? "MSL" : "AGL")
             .arg(QString::number(wp.speedKnots, 'f', 0)));
         lastWpLabel_->setVisible(true);
+        adjustSize();
     }
 
-    QPushButton* clearButton() { return clearBtn_; }
-
-protected:
-    // Let mouse events pass through to the Rocky view, except on interactive widgets
-    bool event(QEvent* e) override
+    void positionOver(const QPoint& topLeft)
     {
-        if (e->type() == QEvent::MouseButtonPress ||
-            e->type() == QEvent::MouseButtonRelease ||
-            e->type() == QEvent::MouseMove ||
-            e->type() == QEvent::Wheel)
-        {
-            // Check if the event is over an interactive child widget
-            auto* me = static_cast<QMouseEvent*>(e);
-            QWidget* child = childAt(me->pos());
-            if (child && (qobject_cast<QDoubleSpinBox*>(child) ||
-                          qobject_cast<QComboBox*>(child) ||
-                          qobject_cast<QPushButton*>(child) ||
-                          qobject_cast<QAbstractSpinBox*>(child)))
-            {
-                return QWidget::event(e); // handle normally
-            }
-            // Otherwise pass through to Rocky view underneath
-            e->ignore();
-            return false;
-        }
-        return QWidget::event(e);
+        move(topLeft.x() + 12, topLeft.y() + 12);
     }
 
 private:
     QLabel* instructionLabel_;
     QLabel* lastWpLabel_;
-    QDoubleSpinBox* altSpin_;
-    QComboBox* altTypeCombo_;
-    QDoubleSpinBox* speedSpin_;
-    QPushButton* clearBtn_;
 };
 
 // ── Rocky dock content ──────────────────────────────────────────────
@@ -456,25 +447,58 @@ public:
         rockyWindow_->initializeWindow();
         app_.display.addWindow(rockyWindow_->windowAdapter);
 
-        hud_ = new FlightHUD(rockyWidget_);
-        hud_->raise();
+        settingsPanel_ = new FlightSettingsPanel();
+        infoOverlay_ = new FlightInfoOverlay();
+        settingsPanel_->show();
+        infoOverlay_->show();
     }
 
-    FlightHUD* hud() { return hud_; }
+    FlightSettingsPanel* settingsPanel() { return settingsPanel_; }
+    FlightInfoOverlay* infoOverlay() { return infoOverlay_; }
 
 protected:
     void resizeEvent(QResizeEvent* event) override
     {
         QWidget::resizeEvent(event);
-        if (hud_ && rockyWidget_)
-            hud_->setGeometry(rockyWidget_->rect());
+        repositionOverlays();
+    }
+
+    void moveEvent(QMoveEvent* event) override
+    {
+        QWidget::moveEvent(event);
+        repositionOverlays();
+    }
+
+    void showEvent(QShowEvent* event) override
+    {
+        QWidget::showEvent(event);
+        repositionOverlays();
+        if (settingsPanel_) settingsPanel_->show();
+        if (infoOverlay_) infoOverlay_->show();
+    }
+
+    void hideEvent(QHideEvent* event) override
+    {
+        QWidget::hideEvent(event);
+        if (settingsPanel_) settingsPanel_->hide();
+        if (infoOverlay_) infoOverlay_->hide();
     }
 
 private:
+    void repositionOverlays()
+    {
+        if (!rockyWidget_) return;
+        QPoint tl = rockyWidget_->mapToGlobal(QPoint(0, 0));
+        QPoint tr = rockyWidget_->mapToGlobal(QPoint(rockyWidget_->width(), 0));
+        if (settingsPanel_) settingsPanel_->positionOver(tr);
+        if (infoOverlay_) infoOverlay_->positionOver(tl);
+    }
+
     rocky::Application& app_;
     vsgQt::Window* rockyWindow_ = nullptr;
     QWidget* rockyWidget_ = nullptr;
-    FlightHUD* hud_ = nullptr;
+    FlightSettingsPanel* settingsPanel_ = nullptr;
+    FlightInfoOverlay* infoOverlay_ = nullptr;
 };
 
 // ── Flight plan formatter ───────────────────────────────────────────
@@ -691,7 +715,7 @@ int main(int argc, char** argv)
     };
 
     // Clear flight plan
-    QObject::connect(rockyContent->hud()->clearButton(), &QPushButton::clicked, [&]() {
+    QObject::connect(rockyContent->settingsPanel()->clearButton(), &QPushButton::clicked, [&]() {
         app.registry.write([&](entt::registry& r) {
             for (auto& wp : waypoints)
                 if (wp.pointEntity != entt::null && r.valid(wp.pointEntity))
@@ -710,7 +734,7 @@ int main(int argc, char** argv)
 
     fileMenu->addSeparator();
     fileMenu->addAction("&Clear Flight Plan", [&]() {
-        rockyContent->hud()->clearButton()->click();
+        rockyContent->settingsPanel()->clearButton()->click();
     });
 
     // ── Poll timer ──────────────────────────────────────────────────
@@ -739,7 +763,7 @@ int main(int argc, char** argv)
             wpTree->addTopLevelItem(item);
             wpTree->scrollToBottom();
 
-            rockyContent->hud()->showWaypoint(wp);
+            rockyContent->infoOverlay()->showWaypoint(wp);
 
             mainWindow.statusBar()->showMessage(
                 QString("WP%1 added - %2 waypoints in plan")
