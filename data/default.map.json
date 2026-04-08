@@ -3,9 +3,15 @@
         "name": "Flight Planner Globe",
         "layers": [
             {
-                "name": "ReadyMap 90m Elevation",
+                "name": "MapZen Terrarium Elevation",
                 "type": "TMSElevation",
-                "uri": "https://readymap.org/readymap/tiles/1.0.0/116/"
+                "uri": "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
+                "encoding": "terrarium",
+                "maxLevel": 15,
+                "profile": "spherical-mercator",
+                "attribution": {
+                    "text": "Elevation by MapZen/AWS"
+                }
             },
             {
                 "name": "ArcGIS World Imagery",

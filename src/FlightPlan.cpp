@@ -92,8 +92,8 @@ void FlightPlan::updateRouteLine(rocky::Application& app)
 
         auto& style = r.emplace<LineStyle>(routeLineEntity_);
         style.color = Color(0.2f, 0.8f, 1.0f, 0.9f);
-        style.width = 3.0f;
-        style.depthOffset = 10000.0f;
+        style.width = 5.0f;
+        style.depthOffset = 100000.0f;
 
         r.emplace<Line>(routeLineEntity_, geom, style);
         app.vsgcontext->requestFrame();
