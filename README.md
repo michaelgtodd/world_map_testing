@@ -1,5 +1,7 @@
 # Rocky Flight Planner
 
+[![CI](https://github.com/michaelgtodd/world_map_testing/actions/workflows/ci.yml/badge.svg)](https://github.com/michaelgtodd/world_map_testing/actions/workflows/ci.yml)
+
 A C++ flight planning application built on [Rocky](https://github.com/pelicanmapping/rocky) (Vulkan earth renderer), Qt6, and the [Qt Advanced Docking System](https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System). Place waypoints on a 3D globe, configure altitude and speed, and generate textual flight plans with great-circle route visualization.
 
 ## Features
