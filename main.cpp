@@ -1037,7 +1037,9 @@ int main(int argc, char** argv)
             app.vsgcontext->requestFrame();
         });
         QObject::connect(nav, &NavWidget::zoomRequested, [manipRef, &app](double dx, double dy) {
-            manipRef->zoom(dx, dy);
+            // Scale distance directly to avoid mouse-position-based zoom centering
+            double scale = 1.0 + dy;
+            manipRef->setDistance(manipRef->distance() * scale);
             app.vsgcontext->requestFrame();
         });
         QObject::connect(nav, &NavWidget::homeRequested, [manipRef, &app]() {
