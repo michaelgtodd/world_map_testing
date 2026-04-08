@@ -43,7 +43,7 @@ ENV VCPKG_DIR=/opt/vcpkg
 
 # ── Qt Advanced Docking System ───────────────────────────────────────
 
-RUN git clone --depth 1 https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System.git \
+RUN git clone https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System.git \
     && cd Qt-Advanced-Docking-System \
     && cmake -B build -G Ninja \
         -DCMAKE_INSTALL_PREFIX=/opt/local \
@@ -57,6 +57,7 @@ RUN git clone --depth 1 https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-
 
 COPY docker/rocky-imgui-fix.patch /opt/rocky-imgui-fix.patch
 
+# Build Rocky without Qt demo (vsgQt not available yet)
 RUN TRIPLET=$(cat /tmp/vcpkg-triplet) && \
     git clone --depth 1 https://github.com/pelicanmapping/rocky.git \
     && cd rocky \
@@ -65,7 +66,7 @@ RUN TRIPLET=$(cat /tmp/vcpkg-triplet) && \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_TOOLCHAIN_FILE=$VCPKG_DIR/scripts/buildsystems/vcpkg.cmake \
         -DVCPKG_MANIFEST_DIR=/opt/rocky \
-        -DROCKY_SUPPORTS_QT=ON \
+        -DROCKY_SUPPORTS_QT=OFF \
         -DROCKY_SUPPORTS_IMGUI=OFF \
         -DCMAKE_INSTALL_PREFIX=/opt/local \
     && ninja -C build -j$(nproc) \
