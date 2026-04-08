@@ -4,6 +4,8 @@
 
 A C++ flight planning application built on [Rocky](https://github.com/pelicanmapping/rocky) (Vulkan earth renderer), Qt6, and the [Qt Advanced Docking System](https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System). Place waypoints on a 3D globe, configure altitude and speed, and generate textual flight plans with great-circle route visualization.
 
+![Rocky Flight Planner](docs/images/screenshot.png)
+
 ## Features
 
 - **3D Earth View** -- Rocky/Vulkan globe with TMS imagery and elevation, embedded in a Qt docking pane
