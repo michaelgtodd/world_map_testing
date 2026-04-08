@@ -822,7 +822,30 @@ public:
     FlightInfoOverlay* infoOverlay() { return infoOverlay_; }
     NavWidget* navWidget() { return navWidget_; }
 
+    // Install event filters on all ancestor widgets up to the top-level window
+    // so we catch moves/resizes at every level of the hierarchy.
+    void installAncestorFilters()
+    {
+        QWidget* w = parentWidget();
+        while (w)
+        {
+            w->installEventFilter(this);
+            w = w->parentWidget();
+        }
+    }
+
 protected:
+    bool eventFilter(QObject* obj, QEvent* event) override
+    {
+        auto type = event->type();
+        if (type == QEvent::Move || type == QEvent::Resize ||
+            type == QEvent::WindowStateChange || type == QEvent::LayoutRequest)
+        {
+            repositionOverlays();
+        }
+        return QWidget::eventFilter(obj, event);
+    }
+
     void resizeEvent(QResizeEvent* event) override
     {
         QWidget::resizeEvent(event);
@@ -836,6 +859,7 @@ protected:
     void showEvent(QShowEvent* event) override
     {
         QWidget::showEvent(event);
+        installAncestorFilters();
         repositionOverlays();
         if (settingsPanel_) settingsPanel_->show();
         if (infoOverlay_) infoOverlay_->show();
