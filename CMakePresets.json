@@ -1,0 +1,31 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "default",
+            "displayName": "Default",
+            "binaryDir": "${sourceDir}/build",
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_PREFIX_PATH": "/home/parallels/local;/home/parallels/rocky/build/vcpkg_installed/arm64-linux;/usr/lib/aarch64-linux-gnu/cmake",
+                "CMAKE_INSTALL_RPATH_USE_LINK_PATH": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "default",
+            "configurePreset": "default"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "default",
+            "configurePreset": "default",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
+    ]
+}

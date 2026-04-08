@@ -5,28 +5,30 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-# Find Qt6
+# Set RPATH so the binary finds shared libs without LD_LIBRARY_PATH
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+
+# ── Dependencies ─────────────────────────────────────────────────────
+
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
-
-# Find Qt Advanced Docking System
 find_package(qtadvanceddocking-qt6 REQUIRED)
-
-# Find Rocky and its dependencies
 find_package(rocky CONFIG REQUIRED)
-find_package(vsg CONFIG REQUIRED)
-find_package(glslang CONFIG REQUIRED)
 find_package(vsgQt CONFIG REQUIRED)
+
+# ── Main executable ──────────────────────────────────────────────────
 
 add_executable(${PROJECT_NAME}
     main.cpp
     FlightPlan.cpp
     widgets/EarthViewPane.cpp
+    # Headers with Q_OBJECT listed for AUTOMOC (not included by any .cpp)
     widgets/FlightSettingsPanel.h
     widgets/FlightInfoOverlay.h
     widgets/NavWidget.h
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR})
+target_include_directories(${PROJECT_NAME} PRIVATE ${PROJECT_SOURCE_DIR})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Core
@@ -44,20 +46,15 @@ option(BUILD_TESTS "Build unit tests" ON)
 if(BUILD_TESTS)
     enable_testing()
     find_package(GTest REQUIRED)
+    find_package(glm CONFIG REQUIRED)
 
     add_executable(tests
         tests/test_geodesy.cpp
         tests/test_waypoint.cpp
     )
 
-    find_package(glm CONFIG REQUIRED)
-
-    target_include_directories(tests PRIVATE ${CMAKE_SOURCE_DIR})
-
-    target_link_libraries(tests PRIVATE
-        GTest::gtest_main
-        glm::glm
-    )
+    target_include_directories(tests PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(tests PRIVATE GTest::gtest_main glm::glm)
 
     include(GoogleTest)
     gtest_discover_tests(tests)
