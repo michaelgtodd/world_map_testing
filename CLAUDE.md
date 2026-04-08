@@ -50,6 +50,6 @@ This drives the **floating overlay pattern**: `FlightSettingsPanel`, `FlightInfo
 ## Platform Notes
 
 - `QT_QPA_PLATFORM=xcb` is required — vsgQt creates XCB Vulkan surfaces, but the system may default to Wayland
-- Rocky 1.0.2 needs patches to build with `ROCKY_SUPPORTS_IMGUI=OFF` (see `docker/rocky-imgui-fix.patch`)
+- Rocky is built with ImGui enabled (the default) to avoid source patches needed when `ROCKY_SUPPORTS_IMGUI=OFF`
 - Qt Advanced Docking System needs a full git clone (not `--depth 1`) for version tag detection
 - Nav widget zoom uses `MapManipulator::setDistance()` instead of `zoom()` to avoid mouse-position-based centering

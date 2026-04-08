@@ -62,18 +62,15 @@ RUN git clone --branch $ADS_TAG https://github.com/githubuser0xFFFF/Qt-Advanced-
 
 # ── Rocky (with vcpkg dependencies) ─────────────────────────────────
 
-COPY docker/rocky-imgui-fix.patch /opt/rocky-imgui-fix.patch
-
 # Build Rocky without Qt demo (vsgQt not available yet)
+# ImGui enabled (the default) to avoid source patches
 RUN git clone --branch $ROCKY_TAG --depth 1 https://github.com/pelicanmapping/rocky.git \
     && cd rocky \
-    && git apply /opt/rocky-imgui-fix.patch \
     && cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_TOOLCHAIN_FILE=$VCPKG_DIR/scripts/buildsystems/vcpkg.cmake \
         -DVCPKG_MANIFEST_DIR=/opt/rocky \
         -DROCKY_SUPPORTS_QT=OFF \
-        -DROCKY_SUPPORTS_IMGUI=OFF \
         -DCMAKE_INSTALL_PREFIX=/opt/local \
     && ninja -C build -j$(nproc) \
     && ninja -C build install

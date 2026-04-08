@@ -62,7 +62,7 @@ See `docker/Dockerfile` for the complete reproducible build from a clean Ubuntu 
 
 1. **vcpkg** -- Clone and bootstrap
 2. **Qt Advanced Docking System** -- Build with Qt6 support
-3. **Rocky** -- Build with vcpkg toolchain (Qt demo disabled, ImGui disabled with patches from `docker/rocky-imgui-fix.patch`)
+3. **Rocky** -- Build with vcpkg toolchain (Qt demo disabled, ImGui enabled)
 4. **vsgQt** -- Build against system Qt6 and vcpkg's VSG
 
 ### Docker (Clean Build Test)
@@ -125,7 +125,6 @@ scripts/
 docker/
   Dockerfile                    Clean Ubuntu 24.04 build test
   build.sh                      Docker build script
-  rocky-imgui-fix.patch         Patches for building Rocky without ImGui
 docs/
   requirements.md               Feature checklist
   architecture_notes.md         Architecture and platform quirks

@@ -57,17 +57,9 @@ The solution is a **QApplication-level event filter** installed by `EarthViewPan
 
 ## Rocky Build Quirks
 
-### Building Without ImGui
+### ImGui Dependency
 
-Rocky 1.0.2 has compilation errors when built with `ROCKY_SUPPORTS_IMGUI=OFF`:
-
-1. **`Application.h`** forward-declares `class RenderImGuiContext` unconditionally, but the `.cpp` file uses `using RenderImGuiContext = vsg::Node` when ImGui is disabled. Fix: wrap the forward declaration in `#ifdef ROCKY_HAS_IMGUI`.
-
-2. **`ECSNode.cpp`** calls `LabelSystem::create()` unconditionally, but `LabelSystem` is entirely guarded behind `#ifdef ROCKY_HAS_IMGUI`. Fix: move the call inside the guard.
-
-3. **`LabelSystem.cpp`** has no `#ifdef` guard around its implementation. Fix: wrap the entire file in `#ifdef ROCKY_HAS_IMGUI`.
-
-These patches are captured in `docker/rocky-imgui-fix.patch`.
+Rocky has compilation errors when built with `ROCKY_SUPPORTS_IMGUI=OFF` (forward declarations, unguarded LabelSystem code). Rather than patching the source, we build with ImGui enabled (the default). This pulls in the `imgui` vcpkg package with Vulkan bindings, which adds ~1MB to the build but eliminates the need for source patches.
 
 ### vsgQt is Not in Rocky's vcpkg Manifest
 
