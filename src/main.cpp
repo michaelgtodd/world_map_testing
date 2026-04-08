@@ -10,6 +10,8 @@
 #include <rocky/rocky.h>
 #include <rocky/vsg/DisplayManager.h>
 
+#include <fstream>
+
 #include <QApplication>
 #include <QMainWindow>
 #include <QLabel>
@@ -51,27 +53,24 @@ int main(int argc, char** argv)
     app.vsgcontext->devicePixelRatio = []() { return 1.0; };
     rocky::Log()->set_level(rocky::log::level::info);
 
-    if (app.mapNode->map->layers().empty())
+    // Load map configuration from JSON file
     {
-        // ReadyMap elevation (proper TMS endpoint)
-        auto elev = rocky::TMSElevationLayer::create();
-        elev->uri = "https://readymap.org/readymap/tiles/1.0.0/116/";
-        app.mapNode->map->add(elev);
-
-        // ArcGIS World Imagery - set profile to bypass TMS manifest discovery
-        // and treat as an XYZ tile server
-        auto img = rocky::TMSImageLayer::create();
-        img->uri = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
-        img->format = "image/jpeg";
-        img->profile = rocky::Profile("spherical-mercator");
-        img->invertY = false; // ArcGIS uses standard web tile Y ordering
-        app.mapNode->map->add(img);
+        std::string mapFile = "data/default.map.json";
+        // Check relative to executable, then relative to source dir
+        for (auto& candidate : { mapFile, std::string(PROJECT_SOURCE_DIR "/data/default.map.json") })
+        {
+            std::ifstream f(candidate);
+            if (f.good())
+            {
+                std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                auto r = app.mapNode->from_json(json, app.vsgcontext->io);
+                if (r.failed())
+                    fprintf(stderr, "Warning: failed to load map file %s\n", candidate.c_str());
+                else
+                    break;
+            }
+        }
     }
-
-    // Terrain quality
-    app.mapNode->terrainSettings().lighting = true;
-    app.mapNode->terrainSettings().skirtRatio = 0.025f;
-    app.mapNode->terrainSettings().concurrency = 8;
 
     // Sky and atmosphere
     if (app.skyNode)

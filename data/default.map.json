@@ -1,0 +1,29 @@
+{
+    "map": {
+        "name": "Flight Planner Globe",
+        "layers": [
+            {
+                "name": "ReadyMap 90m Elevation",
+                "type": "TMSElevation",
+                "uri": "https://readymap.org/readymap/tiles/1.0.0/116/"
+            },
+            {
+                "name": "ArcGIS World Imagery",
+                "type": "TMSImage",
+                "uri": "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                "format": "image/jpeg",
+                "profile": "spherical-mercator",
+                "invertY": false,
+                "attribution": {
+                    "text": "Imagery by Esri (noncommercial use)",
+                    "href": "https://services.arcgisonline.com"
+                }
+            }
+        ]
+    },
+    "terrain": {
+        "lighting": true,
+        "skirtRatio": 0.025,
+        "concurrency": 8
+    }
+}

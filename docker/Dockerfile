@@ -93,6 +93,7 @@ RUN TRIPLET=$(cat /tmp/vcpkg-triplet) && \
 
 WORKDIR /src
 COPY . /src/
+# Ensure data directory is available at build time for PROJECT_SOURCE_DIR fallback
 
 RUN TRIPLET=$(cat /tmp/vcpkg-triplet) && \
     cmake -B build -G Ninja \
